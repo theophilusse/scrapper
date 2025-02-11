@@ -6,6 +6,8 @@
 #define FREE(x) free(x)
 #define DEBUG printf("%s : %d\n", __func__, __LINE__);
 
+// Ne pas oublier -lws2_32 sur Windows
+// Ligne 1071 macro Windows/Linux
 #define STRING_SIZE 128
 
 typedef unsigned int uint;
@@ -299,10 +301,21 @@ int                 string_is_number(char *str)
 
 char                *string_goto(char *src, char c)
 {
+    if (!src)
+        return (NULL);
     while (*src && *src != c)
         src++;
     if (!*src)
         return (NULL);
+    return (src);
+}
+
+char                *string_goto_nonnull(char *src, char c)
+{
+    if (!src)
+        return (NULL);
+    while (*src && *src != c)
+        src++;
     return (src);
 }
 
@@ -814,11 +827,30 @@ char            *buffer_param_get_var_buf(t_buf *buf, char *varname)
     {
         param = *((t_buf_param **)buffer_get_index(buf, i));
         //param = buffer_get_index(buf, i);
+        if (strncasecmp(param->name, varname, strlen(varname)) == 0)
+            return ((char *)param->data.buf);
+    }
+    return (NULL);
+}
+
+char            *buffer_param_get_var_buf_case(t_buf *buf, char *varname)
+{
+    uint            i;
+    struct s_buf    ret;
+    t_buf_param     *param;
+
+    if (!buf)
+        return (NULL);
+    i = -1;
+    while (++i < buf->size)
+    {
+        param = *((t_buf_param **)buffer_get_index(buf, i));
+        //param = buffer_get_index(buf, i);
         if (strncmp(param->name, varname, strlen(varname)) == 0)
             return ((char *)param->data.buf);
     }
     return (NULL);
-};
+}
 
 struct s_buf        html_find_node_param(t_html_node *node, char *name, char *data)
 {
@@ -1164,8 +1196,11 @@ struct s_net_connection     net_new_connection(char *ip, int port, int ssl)
 
 int             net_connect(t_net_connection *con)
 {
+    DEBUG //
     if (!con || con->connected == 1)
         return (1);
+    printf("CONNECT [%s]\n", con->ip);
+    DEBUG //
     #ifdef _WIN32
     #ifdef SSL_ENABLED
     if (con->ssl_enabled)
@@ -1686,8 +1721,11 @@ struct s_http_request   http_new_request(char *url, char *method, t_buf *param, 
     }
     if (header)
     {
+        DEBUG //
         request.header = buffer_new(sizeof(t_buf_param), 0);
         buffer_concat(&request.header, header);
+        buffer_display_param_list(&request.header);///
+        DEBUG //
     }
     if (content)
         request.content = *content;
@@ -1996,6 +2034,8 @@ struct s_net_connection         url_new_connection(char *url)
     char                        *ip;
 
     memset(&con, 0, sizeof(struct s_net_connection));
+    DEBUG //
+    printf("CONNECT URL [%s]\n", url);//
     if (!(host = url_get_host(url)))
         return (con);
     printf("New connection to [%s]\n", host);
@@ -2020,6 +2060,18 @@ struct s_net_connection         url_new_connection(char *url)
     return (con);
 }
 
+void                           http_display_request(t_http_request *request)
+{
+    if (!request)
+        return ;
+    printf("URL [%s][%s]\n", request->method, request->url);
+    printf("Param:\n");
+    buffer_display_param_list(&request->param);
+    printf("Header:\n");
+    buffer_display_param_list(&request->header);
+    printf("Content @ %p\n", &request->content);
+}
+
 char            *http_send_request(t_http_request *request, uint *recv_length)
 {
     char                    *buffer;
@@ -2035,11 +2087,15 @@ char            *http_send_request(t_http_request *request, uint *recv_length)
     if (!request)
         return (NULL);
     DEBUG //
-    if (url_is_https(request->url))
+    http_display_request(request); //
+    DEBUG //
+    if (url_is_https(request->url) == 1)
         return (NULL);
+    DEBUG //
     con = url_new_connection(request->url);
     if (net_connect(&con))
         return (NULL);
+    DEBUG //
     printf("Url [%s]\n", request->url);
     if (!(host = url_get_host(request->url)))
         return (NULL);
@@ -2148,6 +2204,19 @@ typedef struct s_http_response
     char            *buf;
 }               t_http_response;
 
+void                           http_display_response(t_http_response *response)
+{
+    if (!response)
+        return ;
+    printf("Version: %s\n", response->http_version);
+    printf("Code [%d]\n", response->code);
+    printf("Message \"%s\"\n", response->message);
+    printf("Content-type [%s]\n", response->content_type);
+    printf("Headers\n");
+    buffer_display_param_list(&response->header);
+    ///printf("CONTENT\n-----------------------\n%s\n", response->buf);
+}
+
 void            http_free_response(t_http_response *response)
 {
     uint            i;
@@ -2223,14 +2292,16 @@ t_buf_param         *buffer_new_param_http(char *http)
         return (NULL);
     }
     memcpy(param->name, http, endofstring - http);
+    DEBUG //
+    printf("PTR [%s]\n", endofstring + 1);//
     if (!(ptr = string_skipblank(endofstring + 1)))
     {
         FREE(param);
         return (NULL);
     }
+    DEBUG //
     if (*ptr == '\'' || *ptr == '"')
     {
-        ;
         endofstring = string_goto(ptr, '\n');
         if (!(param->data.buf = html_new_string(ptr, NULL)))
         {
@@ -2242,43 +2313,25 @@ t_buf_param         *buffer_new_param_http(char *http)
     }
     else
     {
-        endofstring = string_goto(ptr, '\n');
+        DEBUG //
+        endofstring = string_goto_nonnull(ptr, '\n');
+        printf("PTR [%s]\n", ptr);//
+        printf("ENDOFSTRING [%s]\n", endofstring); //
+        printf("(ENDOFSTRING - PTR) + 1 == %u\n", (endofstring - ptr) + 1); //
         if (!(param->data.buf = ALLOC((endofstring - ptr) + 1)))
         {
+            DEBUG //
             FREE(param);
             return (NULL);
         }
+        DEBUG //
         param->data.blocksize = 1;
         param->data.size = endofstring - ptr;
         memset(param->data.buf, 0, (endofstring - ptr) + 1);
         memcpy(param->data.buf, ptr, endofstring - ptr);
+        printf("DATA BUF [%s]\n", param->data.buf); //
     }
     return (param);
-}
-
-void                           http_display_request(t_http_request *request)
-{
-    if (!request)
-        return ;
-    printf("URL [%s][%s]\n", request->method, request->url);
-    printf("Param:\n");
-    buffer_display_param_list(&request->param);
-    printf("Header:\n");
-    buffer_display_param_list(&request->header);
-    printf("Content @ %p\n", &request->content);
-}
-
-void                           http_display_response(t_http_response *response)
-{
-    if (!response)
-        return ;
-    printf("Version: %s\n", response->http_version);
-    printf("Code [%d]\n", response->code);
-    printf("Massage \"%s\"\n", response->message);
-    printf("Content-type [%s]\n", response->content_type);
-    printf("Headers\n");
-    buffer_display_param_list(&response->header);
-    ///printf("CONTENT\n-----------------------\n%s\n", response->buf);
 }
 
 struct s_http_response         http_new_response(char *http)
@@ -2348,8 +2401,10 @@ struct s_http_response         http_new_response(char *http)
     while (is_alphanum(*(++ptr)))
     {
         DEBUG //
+        printf("PTR [%s]\n", ptr);//
         if (!(param = buffer_new_param_http(ptr)))
         {
+            DEBUG //
             FREE(res);
             http_free_response(&response);
             return (response);
@@ -2371,9 +2426,9 @@ struct s_http_response         http_new_response(char *http)
         else
             buffer_push(&response.header, &param);
         DEBUG //
-        ptr = string_goto(ptr, '\n');
+        ptr = string_goto_nonnull(ptr, '\n');
         DEBUG //
-        if (!*ptr)
+        if (0 && !ptr)
         {
             FREE(res);
             http_free_response(&response);
@@ -2414,6 +2469,43 @@ struct s_http_response         http_new_response(char *http)
     return (response);
 }
 
+int                 url_is_relative(char *url)
+{
+    char        *proto;
+
+    if (!(proto = url_get_proto(url)))
+        return (1);
+    FREE(proto);
+    return (0);
+}
+
+char                *url_get_full(char *src, char *relative)
+{
+    char        *full;
+    char        *proto;
+    char        *host;
+
+    if (!src || !relative)
+        return (NULL);
+    if (!url_is_relative(relative))
+        return (strdup(relative));
+    if (!(host = url_get_host(src)))
+        return (NULL);
+    if (!(proto = url_get_proto(src)))
+    {
+        FREE(host);
+        return (NULL);
+    }
+    full = string_stradd(NULL, proto);
+    full = string_stradd(full, "://");
+    full = string_stradd(full, host);
+    full = string_stradd(full, "/");
+    full = string_stradd(full, relative);
+    FREE(proto);
+    FREE(host);
+    return (full);
+}
+
 struct s_http_response  web_get_page(char *url)
 {
     struct s_buf            header;
@@ -2424,7 +2516,7 @@ struct s_http_response  web_get_page(char *url)
     char                    *recv;
 
     memset(&response, 0, sizeof(struct s_http_response));
-    if ((host = url_get_host(url)))
+    if (!url_is_ipv4(url) && (host = url_get_host(url)))
     {
         header = buffer_new_param_list(2, "User-Agent='custom'", host);
         FREE(host);
@@ -2437,21 +2529,36 @@ struct s_http_response  web_get_page(char *url)
         http_free_request(&request);
         return (response);
     }
+    DEBUG //
+    printf("RECV [%s]\n", recv); //
     response = http_new_response(recv);
     FREE(recv);
     if (response.code == 301 || response.code == 302)
     {
+        char *full_url;
+        char *location_url;
+        location_url = buffer_param_get_var_buf(&response.header, "location");
+        // Robin
+        if (url_is_relative(location_url))
+            full_url = url_get_full(request.url, location_url);
+        else
+            full_url = strdup(buffer_param_get_var_buf(&response.header, "location"));
+        DEBUG //
+        printf("FULL_URL = [%s]\n", full_url); //
+        DEBUG //
         if (strncmp(
                     request.url,
-                    buffer_param_get_var_buf(&response.header, "location"),
+                    full_url,
                     strlen(request.url)
                 ) == 0)
         {
+            FREE(full_url);
             http_free_request(&request);
             return (response);
         }
         http_free_request(&request);
-        redirect = web_get_page(buffer_param_get_var_buf(&response.header, "location"));
+        redirect = web_get_page(full_url);
+        FREE(full_url);
         http_free_response(&response);
         return (redirect);
     }
@@ -2472,7 +2579,7 @@ struct s_http_response  web_get_page_request(char *url, t_http_request *out)
     DEBUG //
     memset(&response, 0, sizeof(struct s_http_response));
     DEBUG //
-    if ((hostname = url_get_host(url)))
+    if (!url_is_ipv4(url) && (hostname = url_get_host(url)))
     {
         host = string_stradd(NULL, "Host='");
         host = string_stradd(host, hostname);
@@ -2484,8 +2591,11 @@ struct s_http_response  web_get_page_request(char *url, t_http_request *out)
     else
         header = buffer_new_param_list(1, "User-Agent='custom'");
     DEBUG //
+    buffer_display_param_list(&header); //
+    DEBUG //
     request = http_new_request(url, "GET", NULL, &header, NULL);
     DEBUG //
+    http_display_request(&request); //
     if (!(recv = http_send_request(&request, NULL)))
     {
         http_free_request(&request);
@@ -2518,8 +2628,9 @@ struct s_http_response  web_get_page_request(char *url, t_http_request *out)
             DEBUG //
             return (response);
         }
+        DEBUG //
         http_free_request(&request);
-        redirect = web_get_page(buffer_param_get_var_buf(&response.header, "location"));
+        redirect = web_get_page_request(buffer_param_get_var_buf(&response.header, "location"), out);
         http_free_response(&response);
         return (redirect);
     }
@@ -2848,43 +2959,6 @@ t_web_node          *web_import_xml(char *xml)
     html_display_node(root, 0); // DEBUG
     html_free_node(root);
     return (web);
-}
-
-int                 url_is_relative(char *url)
-{
-    char        *proto;
-
-    if (!(proto = url_get_proto(url)))
-        return (1);
-    FREE(proto);
-    return (0);
-}
-
-char                *url_get_full(char *src, char *relative)
-{
-    char        *full;
-    char        *proto;
-    char        *host;
-
-    if (!src || !relative)
-        return (NULL);
-    if (!url_is_relative(relative))
-        return (strdup(relative));
-    if (!(host = url_get_host(src)))
-        return (NULL);
-    if (!(proto = url_get_proto(src)))
-    {
-        FREE(host);
-        return (NULL);
-    }
-    full = string_stradd(NULL, proto);
-    full = string_stradd(full, "://");
-    full = string_stradd(full, host);
-    full = string_stradd(full, "/");
-    full = string_stradd(full, relative);
-    FREE(proto);
-    FREE(host);
-    return (full);
 }
 
 t_web_node          *web_new_node(char *url, t_web_node *parent, uint maxdepth)
