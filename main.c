@@ -366,6 +366,22 @@ char                *string_duplicate(char *str, uint length)
     return (string);
 }
 
+int                 is_blank(char c)
+{
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+        return (1);
+    return (0);
+}
+
+char                *string_skipblank(char *str)
+{
+    if (!str)
+        return (NULL);
+    while (*str && is_blank(*str))
+        str++;
+    return (str);
+}
+
 char                *string_strip(char *str, char terminator)
 {
     char        *begin;
@@ -373,8 +389,9 @@ char                *string_strip(char *str, char terminator)
 
     if (!(begin = str) || *str == terminator)
         return (NULL);
-    while (*begin && (*begin == ' ' || *begin == '\t' || *begin == '\n'))
-        begin++;
+    begin = string_skipblank(begin);
+    if (*begin == terminator)
+        return (NULL);
     end = begin + 1;
     while (*end && *end != terminator)
         end++;
@@ -478,22 +495,6 @@ static char                 *html_new_string(char *trail, char **end)
     if (end)
         *end = endofstring;
     return (string);
-}
-
-char                *string_skipblank(char *str)
-{
-    if (!str)
-        return (NULL);
-    while (*str && (*str == ' ' || *str == '\t' || *str == '\n' || *str == '\r'))
-        str++;
-    return (str);
-}
-
-int                 is_blank(char c)
-{
-    if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
-        return (1);
-    return (0);
 }
 
 t_buf_param         *buffer_new_param(char *trail, char **end)
@@ -606,6 +607,65 @@ static void                html_link_parent(t_html_node *node, t_html_node *pare
         html_link_parent((t_html_node *)buffer_get_index(&node->child, i), node);
 }
 
+char                *string_skip_string(char *trail)
+{
+    char        delimiter;
+
+    if (!trail)
+        return (NULL);
+    delimiter = *trail;
+    while (*trail && *trail != delimiter)
+    {
+        if (*trail == '\\' && trail[1] == delimiter)
+            trail++;
+        trail++;
+    }
+    return (trail);
+}
+
+char                *string_goto_endtag(char *tagname, char *trail)
+{
+    char            *end;
+
+    if (!trail || !tagname)
+        return (NULL);
+    while (*trail)
+    {
+        if (strlen(trail) < 3 + strlen(tagname))
+            return (trail);
+        if (trail[0] == '<' && trail[1] == '/')
+        {
+            end = trail;
+            trail += 2;
+            if (strncasecmp(tagname, trail, strlen(tagname)) == 0)
+            {
+                trail += strlen(tagname);
+                trail = string_goto(trail, '>');
+                if (*trail == '>')
+                    return (end);
+            }
+        }
+        else if (trail[0] == '\'' || trail == '"')
+        {
+            trail = string_skip_string(trail);
+            if (!*trail)
+                return (trail);
+        }
+        trail++;
+    }
+    return (trail);
+}
+
+int                 html_is_special_tag(char *tagname)
+{
+    if (!tagname)
+        return (0);
+    if (strncasecmp(tagname, "style", STRING_SIZE) == 0 ||
+        strncasecmp(tagname, "script", STRING_SIZE) == 0)
+        return (1);
+    return (0);
+}
+
 t_html_node         *html_new_node(char *tag, t_html_node *parent, char **end)
 {
     t_html_node     *node;
@@ -623,7 +683,22 @@ t_html_node         *html_new_node(char *tag, t_html_node *parent, char **end)
     node->child.blocksize = sizeof(t_html_node);
     string = NULL;
     trail = tag;
-    while (*trail && *trail != '<')
+    if (parent // Special case
+        && html_is_special_tag(parent->tag))
+    {
+        DEBUG //
+        debug_string(trail, 18);
+        endofstring = string_goto_endtag(parent->tag, trail);
+        DEBUG //
+        node->text = string_duplicate(trail, endofstring - trail);
+        trail = string_goto(endofstring + strlen(parent->tag) + 2, '>');
+        if (*trail)
+            trail++;
+        if (end)
+            *end = trail;
+        return (node);
+    }
+    while (*trail && *trail != '<') // Inner
     {
         if (!string && is_printable(*trail) && *trail != ' ' && *trail != '\t')
         {
@@ -650,7 +725,7 @@ t_html_node         *html_new_node(char *tag, t_html_node *parent, char **end)
         return (html_free_node(node));
     memcpy(node->tag, trail, endofstring - trail);
     trail = endofstring;
-    while (*trail && *trail != '>')
+    while (*trail && *trail != '>') // New tag
     {
         if (is_alphanum(*trail))
         {
@@ -670,16 +745,27 @@ t_html_node         *html_new_node(char *tag, t_html_node *parent, char **end)
     }
     trail++; // Inner
     node->is_inline = html_is_inline(node->tag, trail);
-    if (!node->is_inline)
+    DEBUG //
+    printf("CURRENT TAG [%s]\n", node->tag); //
+    if (!node->is_inline
+        //&& strncasecmp(node->tag, "style", STRING_SIZE) != 0
+        )
         while ((inner_node = html_new_node(trail, node, &nexttag))) // Recursion
         {
+            DEBUG //
+            debug_string(nexttag, 20); //
             if (buffer_realloc(&node->child, node->child.size + 1))
                 return (html_free_node(node));
             buffer_set_index(&node->child, node->child.size - 1, inner_node);
             trail = nexttag;
+            if (html_is_special_tag(node->tag))
+                break;
         }
     else
+    {
         nexttag = trail;
+    }
+    DEBUG //
     if (end)
         *end = nexttag;
     if (!parent)
@@ -2011,17 +2097,28 @@ int                             url_is_ipv4(char *host)
 {
     int         count;
     int         i;
+    char        *hostname;
 
+    if (!(hostname = url_get_host(host)))
+        return (0);
+    host = hostname;
     count = 0;
     i = -1;
     while (*host && ++i < 27)
     {
         if (!is_numeric(*host) && *host != '.')
+        {
+            FREE(hostname);
             return (0);
+        }
         if (*host == '.' && ((count += 1) >= 4 || *(host - 1) == '.'))
+        {
+            FREE(hostname);
             return (0);
+        }
         host++;
     }
+    FREE(hostname);
     if (count != 3)
         return (0);
     return (1);
@@ -2074,7 +2171,7 @@ void                           http_display_request(t_http_request *request)
 
 char            *http_send_request(t_http_request *request, uint *recv_length)
 {
-    char                    *buffer;
+    char                    *http;
     struct s_net_connection con;
     int                     i;
     t_json_node             *json;
@@ -2106,10 +2203,10 @@ char            *http_send_request(t_http_request *request, uint *recv_length)
         return (NULL);
     }
     printf("Route [%s]\n", route);
-    buffer = NULL;
-    buffer = string_stradd(buffer, request->method);
-    buffer = string_stradd(buffer, " ");
-    buffer = string_stradd(buffer, route);
+    http = NULL;
+    http = string_stradd(http, request->method);
+    http = string_stradd(http, " ");
+    http = string_stradd(http, route);
     FREE(route);
     i = -1;
     printf("Param :\n");
@@ -2117,40 +2214,41 @@ char            *http_send_request(t_http_request *request, uint *recv_length)
     {
         param = *((t_buf_param **)buffer_get_index(&request->param, i));
         buffer_display_param(param, 1);
-        buffer = string_stradd(buffer, param->name);
-        buffer = string_stradd(buffer, "=");
-        buffer = string_stradd(buffer, param->data.buf);
+        http = string_stradd(http, param->name);
+        http = string_stradd(http, "=");
+        http = string_stradd(http, param->data.buf);
         if (i + 1 < request->param.size - 1)
-            buffer = string_stradd(buffer, "&");
+            http = string_stradd(http, "&");
     }
-    buffer = string_stradd(buffer, " HTTP/1.1\r\n");
+    http = string_stradd(http, " HTTP/1.1\r\n");
     printf("Headers :\n");
+    printf("HOSTNAME :: [%s]\n", host); //
     if (!url_is_ipv4(host))
     {
-        buffer = string_stradd(buffer, "Host: ");
-        buffer = string_stradd(buffer, host);
-        buffer = string_stradd(buffer, "\r\n");
+        http = string_stradd(http, "Host: ");
+        http = string_stradd(http, host);
+        http = string_stradd(http, "\r\n");
     }
     FREE(host);
     if (strlen(request->content.type) > 0)
     {
-        buffer = string_stradd(buffer, "Content-Type: ");
-        buffer = string_stradd(buffer, request->content.type);
-        buffer = string_stradd(buffer, "\r\n");
+        http = string_stradd(http, "Content-Type: ");
+        http = string_stradd(http, request->content.type);
+        http = string_stradd(http, "\r\n");
     }
     i = -1;
     while (++i < request->header.size)
     {
         param = *((t_buf_param **)buffer_get_index(&request->header, i));
         buffer_display_param(param, 1);
-        buffer = string_stradd(buffer, param->name);
-        buffer = string_stradd(buffer, ": ");
-        buffer = string_stradd(buffer, param->data.buf);
-        buffer = string_stradd(buffer, "\r\n");
+        http = string_stradd(http, param->name);
+        http = string_stradd(http, ": ");
+        http = string_stradd(http, param->data.buf);
+        http = string_stradd(http, "\r\n");
     }
     if (strlen(request->content.type) != 0)
     {
-        buffer = string_stradd(buffer, "\r\n");
+        http = string_stradd(http, "\r\n");
         printf("Content : [%s]\n", request->content.type);
         if (strncmp(request->content.type, "application/x-www-form-urlencoded", strlen("application/x-www-form-urlencoded")) == 0)
         {
@@ -2160,7 +2258,7 @@ char            *http_send_request(t_http_request *request, uint *recv_length)
                 param = *((t_buf_param **)buffer_get_index(&request->content.data, i));
                 if ((string = buffer_param_tostring_html(param)))
                 {
-                    buffer = string_stradd(buffer, string);
+                    http = string_stradd(http, string);
                     FREE(string);
                 }
             }
@@ -2173,21 +2271,21 @@ char            *http_send_request(t_http_request *request, uint *recv_length)
                 json = *((t_json_node **)buffer_get_index(&request->content.data, i));
                 if ((string = json_tostring(json)))
                 {
-                    buffer = string_stradd(buffer, string);
+                    http = string_stradd(http, string);
                     FREE(string);
                 }
             }
         }
         else if (strncmp(request->content.type, "text/", strlen("text/")) == 0)
         {
-            //buffer = string_stradd(buffer, request->content.data.buf, request->content.data.size)
-            buffer = string_stradd(buffer, request->content.data.buf);
+            //http = string_stradd(http, request->content.data.buf, request->content.data.size)
+            http = string_stradd(http, request->content.data.buf);
         }
     }
-    buffer = string_stradd(buffer, "\r\n\r\n\r\n");
-    ///printf("%s\n", buffer);
-    ret = net_send_recv(&con, buffer, NULL, recv_length);
-    FREE(buffer);
+    http = string_stradd(http, "\r\n\r\n\r\n");
+    ///printf("%s\n", http);
+    ret = net_send_recv(&con, http, NULL, recv_length);
+    FREE(http);
     net_disconnect(&con);
     return (ret);
 }
@@ -2243,7 +2341,6 @@ void            http_free_response(t_http_response *response)
 char            *string_remove_char(char *str, char c)
 {
     uint        size;
-    uint        count;
     char        *string;
     char        *ret;
 
@@ -2258,9 +2355,8 @@ char            *string_remove_char(char *str, char c)
     ret = string;
     memset(string, 0, size + 1);
     DEBUG //
-    printf("STR\n[%s]\n", str); //
-    count = 0;
-    while (*str && count++ < size)
+    printf("STR REMOVE CHAR\n[%s]\n", str); //
+    while (*str) // && count++ < size)
     {
         if (*str != c)
         {
@@ -2350,6 +2446,7 @@ struct s_http_response         http_new_response(char *http)
     DEBUG //
     if (!(res = string_remove_char(http, '\r')))
         return (response);
+    printf("REMOVE CHAR RESULT [%s]\n", res); //
     ptr = res;
     DEBUG //
     if (!(endofstring = string_goto(ptr, ' ')))
@@ -2460,6 +2557,7 @@ struct s_http_response         http_new_response(char *http)
     else
     {
         DEBUG //
+        printf("RESPONSE CONTENT [%s]\n", ptr); //
         response.content_length = strlen(ptr);
         response.buf = strdup(ptr);
     }
@@ -2499,14 +2597,15 @@ char                *url_get_full(char *src, char *relative)
     full = string_stradd(NULL, proto);
     full = string_stradd(full, "://");
     full = string_stradd(full, host);
-    full = string_stradd(full, "/");
+    if (*relative != '/')
+        full = string_stradd(full, "/");
     full = string_stradd(full, relative);
     FREE(proto);
     FREE(host);
     return (full);
 }
 
-struct s_http_response  web_get_page(char *url)
+struct s_http_response  web_get_page_OLD(char *url)
 {
     struct s_buf            header;
     struct s_http_request   request;
@@ -2538,7 +2637,6 @@ struct s_http_response  web_get_page(char *url)
         char *full_url;
         char *location_url;
         location_url = buffer_param_get_var_buf(&response.header, "location");
-        // Robin
         if (url_is_relative(location_url))
             full_url = url_get_full(request.url, location_url);
         else
@@ -2557,7 +2655,7 @@ struct s_http_response  web_get_page(char *url)
             return (response);
         }
         http_free_request(&request);
-        redirect = web_get_page(full_url);
+        redirect = web_get_page_OLD(full_url);
         FREE(full_url);
         http_free_response(&response);
         return (redirect);
@@ -2566,7 +2664,7 @@ struct s_http_response  web_get_page(char *url)
     return (response);
 }
 
-struct s_http_response  web_get_page_request(char *url, t_http_request *out)
+struct s_http_response  web_get_page(char *url, t_http_request *out)
 {
     struct s_buf            header;
     struct s_http_request   request;
@@ -2578,6 +2676,7 @@ struct s_http_response  web_get_page_request(char *url, t_http_request *out)
 
     DEBUG //
     memset(&response, 0, sizeof(struct s_http_response));
+    printf("GET_PAGE [%s]\n", url); //
     DEBUG //
     if (!url_is_ipv4(url) && (hostname = url_get_host(url)))
     {
@@ -2602,6 +2701,7 @@ struct s_http_response  web_get_page_request(char *url, t_http_request *out)
         return (response);
     }
     DEBUG //
+    printf("RECV [%s]\n", recv); //
     response = http_new_response(recv);
     DEBUG //
     http_display_response(&response); //
@@ -2609,12 +2709,21 @@ struct s_http_response  web_get_page_request(char *url, t_http_request *out)
     FREE(recv);
     if (response.code == 301 || response.code == 302)
     {
+        char *full_url;
+        char *location_url;
+        location_url = buffer_param_get_var_buf(&response.header, "location");
+        if (url_is_relative(location_url))
+            full_url = url_get_full(request.url, location_url);
+        else
+            full_url = strdup(location_url);
         DEBUG //
-        printf("REDIRECT LOCATION [%s]\n", buffer_param_get_var_buf(&response.header, "location"));//
+        printf("REQUEST_URL = [%s]\n", request.url); //
+        printf("FULL_URL = [%s]\n", full_url); //
+        DEBUG //
         if (strncmp(
                     request.url,
-                    buffer_param_get_var_buf(&response.header, "location"),
-                    strlen(request.url)
+                    full_url,
+                    strlen(full_url)
                 ) == 0)
         {
             DEBUG //
@@ -2630,7 +2739,8 @@ struct s_http_response  web_get_page_request(char *url, t_http_request *out)
         }
         DEBUG //
         http_free_request(&request);
-        redirect = web_get_page_request(buffer_param_get_var_buf(&response.header, "location"), out);
+        redirect = web_get_page(full_url, out);
+        FREE(full_url);
         http_free_response(&response);
         return (redirect);
     }
@@ -2937,8 +3047,6 @@ t_web_node              *web_import_xml_node(t_html_node *node, t_web_node *pare
             FREE(web);
             return (NULL);
         }
-        // Batman wrong pointer added?
-        DEBUG //
         buffer_push(&web->child, &child_web);
     }
     buffer_free(&list);
@@ -2980,7 +3088,7 @@ t_web_node          *web_new_node(char *url, t_web_node *parent, uint maxdepth)
         return (NULL);
     memset(node, 0, sizeof(struct s_web_node));
 
-    page = web_get_page_request(url, &node->request);
+    page = web_get_page(url, &node->request);
     DEBUG //
     http_display_response(&page);
 
@@ -3043,6 +3151,7 @@ void            web_shell_display_help(void)
     printf("child : Display childs\n");
     printf("goto : Goto child\n");
     printf("export : Export to XML\n");
+    printf("content : View node content\n");
     printf("----------------\n");
 }
 
@@ -3060,6 +3169,7 @@ void            web_display_node(t_web_node *node)
 int             web_shell(t_web_node *node)
 {
     char            input[STRING_SIZE]; // Pointeur pour la chaîne de caractères
+    char            *output;
     t_web_node      *child;
     size_t          len;
     uint            i;
@@ -3110,7 +3220,13 @@ int             web_shell(t_web_node *node)
                 return (1);
         }
         if (strncmp(input, "export", STRING_SIZE) == 0)
-            web_export_xml(node);
+        {
+            output = web_export_xml(node);
+            printf("%s\n", output);
+            FREE(output);
+        }
+        if (strncmp(input, "content", STRING_SIZE) == 0)
+            printf("%s\n", node->response.buf);
     }
     return (0);
 }
@@ -3129,7 +3245,7 @@ void            test_import_export(char *seed)
     t_web_node          *root;
 
     DEBUG //
-    if (!(root = web_new_node(seed, NULL, 2)))
+    if (!(root = web_new_node(seed, NULL, 1)))
         printf("Error\n");
     char *xml;
 
@@ -3161,7 +3277,7 @@ void            test_web(void)
     struct s_http_response  page;
 
     //page = web_get_page("http://wikipedia.org/");
-    page = web_get_page("http://info.cern.ch/");
+    page = web_get_page_OLD("http://info.cern.ch/");
     http_display_response(&page);
 
     struct s_html_node  root;
