@@ -6,8 +6,11 @@
 #define FREE(x) free(x)
 #define DEBUG printf("%s : %d\n", __func__, __LINE__);
 
+///#define _WIN32
 // Ne pas oublier -lws2_32 sur Windows
-// Ligne 1071 macro Windows/Linux
+
+///#define SSL_ENABLED
+
 #define STRING_SIZE 128
 
 typedef unsigned int uint;
@@ -54,6 +57,48 @@ int                 is_alphanum(char c)
     return (0);
 }
 
+#ifndef _WIN32
+char* itoa(int value, char* str, int base) {
+    int i = 0;
+    int isNegative = 0;
+
+    // Handle 0 explicitly
+    if (value == 0) {
+        str[i++] = '0';
+        str[i] = '\0';
+        return str;
+    }
+
+    // Handle negative numbers for base 10
+    if (value < 0 && base == 10) {
+        isNegative = 1;
+        value = -value;
+    }
+
+    // Convert the number to the given base
+    while (value != 0) {
+        int rem = value % base;
+        str[i++] = (rem > 9) ? (rem - 10) + 'a' : rem + '0';
+        value = value / base;
+    }
+
+    // Append the negative sign for negative numbers
+    if (isNegative) {
+        str[i++] = '-';
+    }
+
+    str[i] = '\0'; // Null-terminate the string
+
+    // Reverse the string
+    for (int j = 0; j < i / 2; j++) {
+        char temp = str[j];
+        str[j] = str[i - j - 1];
+        str[i - j - 1] = temp;
+    }
+
+    return str;
+}
+#endif
 ///////
 
 typedef struct s_buf
@@ -645,7 +690,7 @@ char                *string_goto_endtag(char *tagname, char *trail)
                     return (end);
             }
         }
-        else if (trail[0] == '\'' || trail == '"')
+        else if (trail[0] == '\'' || trail[0] == '"')
         {
             trail = string_skip_string(trail);
             if (!*trail)
@@ -1145,8 +1190,6 @@ struct s_html_node          html_parse(char *html)
 
 ////////////////////////////////////////////////////////////
 
-#define _WIN32
-///#define SSL_ENABLED
 #ifdef _WIN32
 // Windows-specific includes
 #include <winsock2.h>
@@ -1338,6 +1381,7 @@ int             net_disconnect(t_net_connection *con)
     WSACleanup();
     #else
     // close the socket
+    #ifdef SSL_ENABLED
     if (con->ssl_enabled)
     {
         con->ssl_enabled = 0;
@@ -1345,6 +1389,7 @@ int             net_disconnect(t_net_connection *con)
         SSL_CTX_free(con->ctx);
         cleanup_openssl();
     }
+    #endif // SSL_ENABLED
     close(con->sockfd);
     #endif
     con->connected = 0;
@@ -2029,7 +2074,6 @@ struct s_buf    url_get_param(char *url)
 
 char        *net_resolve_domain(const char *domain)
 {
-    WSADATA         wsaData;
     char            *ret;
     struct addrinfo hints, *res, *p;
     int status;
@@ -2037,11 +2081,14 @@ char        *net_resolve_domain(const char *domain)
 
     if (!domain)
         return (NULL);
+    #ifdef _WIN32
+    WSADATA         wsaData;
     // Initialize Winsock
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         fprintf(stderr, "WSAStartup failed: %d\n", WSAGetLastError());
         return (NULL);
     }
+    #endif // _WIN32
 
     ret = NULL;
     // Set up the hints structure
@@ -3185,7 +3232,7 @@ void            test_web(void)
     struct s_http_response  page;
 
     //page = web_get_page("http://wikipedia.org/");
-    page = web_get_page_OLD("http://info.cern.ch/");
+    page = web_get_page("http://info.cern.ch/", NULL);
     http_display_response(&page);
 
     struct s_html_node  root;
