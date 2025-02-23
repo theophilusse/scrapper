@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 
 #define ALLOC(x) malloc(x)
 #define FREE(x) free(x)
@@ -13,7 +14,8 @@
 
 #define STRING_SIZE 128
 
-typedef unsigned int uint;
+typedef unsigned int    uint;
+typedef unsigned char   uchar;
 
 int                 is_printable(char c)
 {
@@ -250,6 +252,11 @@ void        html_display_node_max(t_html_node *node, uint tab, uint maxdepth)
 void debug_string(char *str, uint count)
 {
     printf("DEBUG STRING [");
+    if (!str)
+    {
+        printf("(null)]\n");
+        return ;
+    }
     while (count-- && *str)
         printf("%c", *(str++));
     printf("]\n");
@@ -264,6 +271,23 @@ void    debug_display_int(t_buf *buf) ////////////////////////////
         int *j;
         j = buffer_get_index(buf, i);
         printf("BUF[%d] -> %d\n", i, *j);
+    }
+}
+
+void            buffer_display_param_list(t_buf *list)
+{
+    t_buf_param     *param;
+    int             i;
+
+    if (!list)
+        return ;
+    i = -1;
+    while (++i < list->size)
+    {
+        printf("-----------------\n");
+        param = *((t_buf_param **)buffer_get_index(list, i));
+        printf("Param @ %p\n", param);
+        buffer_display_param(param, 0);
     }
 }
 
@@ -299,6 +323,25 @@ void                *buffer_free_param(t_buf_param *param)
     return (NULL);
 }
 
+void                *html_free_node_noroot(t_html_node *node)
+{
+    uint            i;
+
+    if (!node)
+        return (NULL);
+    i = -1;
+    while (++i < node->param.size)
+        buffer_free_param((t_buf_param *)buffer_get_index(&node->param, i));
+    i = -1;
+    while (++i < node->child.size)
+        html_free_node_noroot((t_html_node *)buffer_get_index(&node->child, i));
+    if (node->text)
+        FREE(node->text);
+    if (node->parent)
+        FREE(node);
+    return (NULL);
+}
+
 void                *html_free_node(t_html_node *node)
 {
     uint            i;
@@ -307,10 +350,10 @@ void                *html_free_node(t_html_node *node)
         return (NULL);
     i = -1;
     while (++i < node->param.size)
-        buffer_free_param((t_buf_param *)buffer_get_index(node->param.buf, i));
+        buffer_free_param((t_buf_param *)buffer_get_index(&node->param, i));
     i = -1;
     while (++i < node->child.size)
-        html_free_node((t_html_node *)buffer_get_index(node->child.buf, i));
+        html_free_node((t_html_node *)buffer_get_index(&node->child, i));
     if (node->text)
         FREE(node->text);
     FREE(node);
@@ -375,6 +418,8 @@ int                 string_char_in(char *src, char c)
 
 char                *string_goto_multiple(char *src, char *c)
 {
+    if (!src)
+        return (NULL);
     while (*src && !string_char_in(c, *src))
         src++;
     if (!*src)
@@ -602,7 +647,7 @@ int             buffer_concat(t_buf *dst, t_buf *src)
     size = dst->size;
     if (buffer_realloc(dst, dst->size + src->size))
         return (1);
-    memcpy(dst->buf + (dst->blocksize * size), src->buf, src->blocksize * src->size);
+    memcpy(dst->buf + (dst->blocksize * size), src->buf, src->blocksize * src->size); /// PLANTE
     return (0);
 }
 
@@ -671,33 +716,56 @@ char                *string_skip_string(char *trail)
 char                *string_goto_endtag(char *tagname, char *trail)
 {
     char            *end;
+    char            *tmp;
+    uint            traillen;
+    uint            taglen;
 
     if (!trail || !tagname)
         return (NULL);
+    traillen = strlen(trail);
+    taglen = strlen(tagname);
     while (*trail)
     {
-        if (strlen(trail) < 3 + strlen(tagname))
+        if (traillen < 3 + taglen)
             return (trail);
         if (trail[0] == '<' && trail[1] == '/')
         {
             end = trail;
             trail += 2;
-            if (strncasecmp(tagname, trail, strlen(tagname)) == 0)
+            traillen -= 2;
+            if (strncasecmp(tagname, trail, taglen) == 0)
             {
-                trail += strlen(tagname);
-                trail = string_goto(trail, '>');
+                trail += taglen;
+                traillen -= taglen;
+                tmp = string_goto(trail, '>');
+                traillen -= tmp - trail;
+                trail = tmp;
                 if (*trail == '>')
                     return (end);
             }
         }
         else if (trail[0] == '\'' || trail[0] == '"')
         {
-            trail = string_skip_string(trail);
+            tmp = string_skip_string(trail);
+            traillen -= tmp - trail;
+            trail = tmp;
             if (!*trail)
                 return (trail);
         }
         trail++;
+        traillen--;
     }
+    return (trail);
+}
+
+char                *string_goto_str(char *trail, char *string)
+{
+    if (!trail || !string)
+        return (NULL);
+    while (*trail && strncmp(trail, string, strlen(string)) != 0)
+        trail++;
+    if (!*trail)
+        return (NULL);
     return (trail);
 }
 
@@ -762,10 +830,42 @@ t_html_node         *html_new_node(char *tag, t_html_node *parent, char **end)
             *end = string_goto(trail, '>') + 1;
         return (html_free_node(node));
     }
+    else if (strncmp(trail, "<!--", strlen("<!--")) == 0) // Comment
+    {
+        strncpy(node->tag, "!--", 3);
+        node->is_inline = 1;
+        trail += strlen("<!--");
+        if (!(trail = string_goto_alphanum(trail)) ||
+        !(endofstring = string_goto_str(trail, "-->")))
+            return (html_free_node(node));
+        endofstring--;
+        while (is_blank(*endofstring))
+            endofstring--;
+        endofstring++;
+        if (is_blank(*(endofstring - 1)))
+            endofstring--;
+        node->text = string_duplicate(trail, endofstring - trail);
+        if (end)
+            *end = string_goto_str(trail, "-->") + 4;
+        return (node);
+
+    }
     if (!(trail = string_goto_alphanum(trail)) ||
         !(endofstring = string_goto_multiple(trail, "\n\t />")))
         return (html_free_node(node));
+    if (endofstring - trail >= STRING_SIZE)
+        endofstring -= ((endofstring - trail) - STRING_SIZE) + 1;
     memcpy(node->tag, trail, endofstring - trail);
+    if (strncasecmp(node->tag, "web", 3) == 0) ///
+    { // Tarzan
+        DEBUG //
+        printf("TAG [%s]\n", node->tag); //
+        printf("PARENT @ %p\n", node->parent);
+        if (node->parent)
+        {
+            printf("PARENT [%s]\n", node->parent->tag);
+        }
+    } //
     trail = endofstring;
     while (*trail && *trail != '>') // New tag
     {
@@ -787,18 +887,35 @@ t_html_node         *html_new_node(char *tag, t_html_node *parent, char **end)
     }
     trail++; // Inner
     node->is_inline = html_is_inline(node->tag, trail);
+    if (strncasecmp(node->tag, "web", 3) == 0) ///
+    {
+        printf("NODE->IS_INLINE %u\n", node->is_inline);
+    }
     if (!node->is_inline
         //&& strncasecmp(node->tag, "style", STRING_SIZE) != 0
         )
+    {
+        if (strncasecmp(node->tag, "web", 3) == 0) ///
+            DEBUG //
         while ((inner_node = html_new_node(trail, node, &nexttag))) // Recursion
         {
+            if (strncasecmp(node->tag, "web", 3) == 0) ///
+            {
+                DEBUG //
+                printf("INNER TAG [%s]\n", inner_node->tag);
+            }
+            /*
             if (buffer_realloc(&node->child, node->child.size + 1))
                 return (html_free_node(node));
             buffer_set_index(&node->child, node->child.size - 1, inner_node);
+            */
+            // Batman
+            buffer_push(&node->child, inner_node); // TEST
             trail = nexttag;
             if (html_is_special_tag(node->tag))
                 break;
         }
+    }
     else
         nexttag = trail;
     if (end)
@@ -918,21 +1035,22 @@ uint        html_count_tag(t_html_node *node, char *name)
     return (count);
 }
 
-void            buffer_display_param_list(t_buf *list)
+char            *buffer_param_get_var_buf_alt(t_buf *buf, char *varname)
 {
+    uint            i;
+    struct s_buf    ret;
     t_buf_param     *param;
-    int             i;
 
-    if (!list)
-        return ;
+    if (!buf)
+        return (NULL);
     i = -1;
-    while (++i < list->size)
+    while (++i < buf->size)
     {
-        printf("-----------------\n");
-        param = *((t_buf_param **)buffer_get_index(list, i));
-        printf("Param @ %p\n", param);
-        buffer_display_param(param, 0);
+        param = (t_buf_param *)buffer_get_index(buf, i);
+        if (strncasecmp(param->name, varname, strlen(varname)) == 0)
+            return ((char *)param->data.buf);
     }
+    return (NULL);
 }
 
 char            *buffer_param_get_var_buf(t_buf *buf, char *varname)
@@ -946,8 +1064,8 @@ char            *buffer_param_get_var_buf(t_buf *buf, char *varname)
     i = -1;
     while (++i < buf->size)
     {
+        //param = *((t_buf_param **)buffer_get_index(buf, i)); // If Crash on Import see alt function below
         param = *((t_buf_param **)buffer_get_index(buf, i));
-        //param = buffer_get_index(buf, i);
         if (strncasecmp(param->name, varname, strlen(varname)) == 0)
             return ((char *)param->data.buf);
     }
@@ -1100,21 +1218,63 @@ char                        *buffer_param_tostring_json(t_buf_param *param)
 
 char                        *html_get_text(t_html_node *html)
 {
+    char        *child_text;
     char        *text;
+    uint        i;
 
+
+    if (!html ||
+        strncasecmp(html->tag, "script", STRING_SIZE) == 0 ||
+        strncasecmp(html->tag, "style", STRING_SIZE) == 0
+        )
+        return (NULL);
     text = NULL;
     if (html->text)
     {
         text = string_stradd(text, html->text);
         text = string_stradd(text, "\n");
     }
-    uint        i;
-    t_html_node *child;
     i = -1;
     while (++i < html->child.size)
     {
-        child = *((t_html_node **)buffer_get_index(&html->child, i));
-        text = string_stradd(text, html_get_text(child));
+        child_text = html_get_text(buffer_get_index(&html->child, i));
+        if (child_text)
+        {
+            text = string_stradd(text, child_text);
+            FREE(child_text);
+        }
+    }
+    return (text);
+}
+
+char                        *html_get_text_tag(t_html_node *html, char *tagname)
+{
+    char        *child_text;
+    char        *text;
+    uint        i;
+
+
+    if (!html || !tagname)
+        return (NULL);
+    text = NULL;
+    if (strncasecmp(html->tag, tagname, STRING_SIZE) == 0)
+    {
+        child_text = html_get_text(html);
+        if (child_text)
+        {
+            text = string_stradd(text, child_text);
+            FREE(child_text);
+        }
+    }
+    i = -1;
+    while (++i < html->child.size)
+    {
+        child_text = html_get_text_tag(buffer_get_index(&html->child, i), tagname);
+        if (child_text)
+        {
+            text = string_stradd(text, child_text);
+            FREE(child_text);
+        }
     }
     return (text);
 }
@@ -1132,11 +1292,12 @@ char                        *html_tostring(t_html_node *html)
     {
         buffer = string_stradd(NULL, "<");
         buffer = string_stradd(buffer, html->tag);
-        buffer = string_stradd(buffer, " ");
+        if (html->param.size > 0)
+            buffer = string_stradd(buffer, " ");
         i = -1;
         while (++i < html->param.size)
         {
-            param = *((t_buf_param **)buffer_get_index(&html->param, i));
+            param = ((t_buf_param *)buffer_get_index(&html->param, i));
             string = buffer_param_tostring_html(param);
             buffer = string_stradd(buffer, string);
             FREE(string);
@@ -1151,11 +1312,11 @@ char                        *html_tostring(t_html_node *html)
     i = -1;
     while (++i < html->child.size)
     {
-        child = *((t_html_node **)buffer_get_index(&html->child, i));
+        child = ((t_html_node *)buffer_get_index(&html->child, i));
         string = html_tostring(child);
         buffer = string_stradd(buffer, string);
     }
-    if (!html->is_inline)
+    if (strlen(html->tag) > 0 && !html->is_inline)
     {
         buffer = string_stradd(buffer, "</");
         buffer = string_stradd(buffer, html->tag);
@@ -1188,6 +1349,113 @@ struct s_html_node          html_parse(char *html)
     return (root);
 }
 
+//////////////////////////////////////////////////////////// STRING
+
+uint        string_count_char(char *str, char c, uint max)
+{
+    uint        count;
+    uint        i;
+
+    if (!str)
+        return (0);
+    count = 0;
+    i = -1;
+    while (str[++i] && i < max)
+        if (str[i] == c)
+            count++;
+    return (count);
+}
+
+//////////////////////////////////////////////////////////// URL
+
+char     *url_get_proto(char *url)
+{
+    char        *proto;
+    char        *endofstring;
+    uint        size;
+
+    if (!url)
+        return (NULL);
+    endofstring = url;
+    while (*endofstring && *endofstring != ':')
+        endofstring++;
+    if (!*endofstring)
+        return (NULL);
+    size = endofstring - url;
+    if (!(proto = ALLOC(size + 1)))
+        return (NULL);
+    memset(proto, 0, size + 1);
+    return (strncpy(proto, url, size));
+}
+
+char     *url_get_host(char *url)
+{
+    char        *host;
+    char        *endofstring;
+    uint        size;
+
+    if (!url)
+        return (NULL);
+    while (*url && *url != ':')
+        url++;
+    if (!*url)
+        return (NULL);
+    url++;
+    endofstring = url;
+    while (*endofstring && *endofstring == '/')
+        endofstring++;
+    if (!*endofstring || endofstring - url != 2 || !(url = endofstring))
+        return (NULL);
+    endofstring = url;
+    while (*endofstring && *endofstring != '/' && *endofstring != ':')
+        endofstring++;
+    if (!*endofstring)
+        return (NULL);
+    size = endofstring - url;
+    if (!(host = ALLOC(size + 1)))
+        return (NULL);
+    memset(host, 0, size + 1);
+    return (strncpy(host, url, size));
+}
+
+char        *url_get_domain(char *url)
+{
+    char        *ptr;
+    char        *host;
+    char        *domain;
+
+    if (!url || !(host = url))
+        return (NULL);
+    if (string_count_char(host, '.', strlen(host)) <= 1)
+        return (string_strdup(host));
+    ptr = host + strlen(host);
+    while (*ptr != '.')
+        ptr--;
+    ptr--;
+    while (*ptr != '.')
+        ptr--;
+    domain = string_duplicate(ptr + 1, strlen(ptr));
+    FREE(host);
+    return (domain);
+}
+
+int         url_get_port_proto(char *proto)
+{
+    if (!proto)
+        return (-1);
+    if (strncasecmp(proto, "http\0", strlen("http") + 1) == 0)
+        return (80);
+    if (strncasecmp(proto, "https\0", strlen("https") + 1) == 0)
+        return (443);
+    if (strncasecmp(proto, "ftp\0", strlen("ftp") + 1) == 0)
+        return (21);
+    if (strncasecmp(proto, "sftp\0", strlen("sftp") + 1) == 0)
+        return (22);
+    if (strncasecmp(proto, "ssh\0", strlen("ssh") + 1) == 0)
+        return (22);
+    return (-1);
+}
+
 ////////////////////////////////////////////////////////////
 
 #ifdef _WIN32
@@ -1204,16 +1472,21 @@ struct s_html_node          html_parse(char *html)
 #include <unistd.h> // read(), write(), close()
 #define SA struct sockaddr
 
+#define PROTOCOL_HTTP 0
+#define PROTOCOL_SOCKS5 1
 typedef struct s_net_connection
 {
     char        connected;
     char        ip[17];
+    int         port;
+    char        *onion;
+    int         protocol;
     #ifdef _WIN32
     WSADATA wsaData;
     SOCKET sock;
     struct sockaddr_in server;
     #else
-    int sockfd, connfd;
+    int sock, connfd;
     struct sockaddr_in servaddr, cli;
     #endif
     int ssl_enabled;
@@ -1255,15 +1528,17 @@ void configure_context(SSL_CTX *ctx) {
 }
 #endif
 
-struct s_net_connection     net_new_connection(char *ip, int port, int ssl)
+struct s_net_connection     net_new_onion_connection(char *host, int port, int ssl)
 {
     struct s_net_connection     con;
 
-    printf("Connecting to [%s] Port: %d\n", ip, port);
+    printf("Connecting to [%s] Port: %d\n", host, port);
     memset(&con, 0, sizeof(struct s_net_connection));
-    if (!ip || port < 0)
+    if (!host || port < 0)
         return (con);
-    strncpy(con.ip, ip, 16);
+    con.port = port;
+    con.protocol = PROTOCOL_SOCKS5;
+    strncpy(con.ip, "127.0.0.1", 16);
     #ifdef _WIN32
     // Initialize Winsock
     if (WSAStartup(MAKEWORD(2, 2), &con.wsaData) != 0)
@@ -1278,10 +1553,75 @@ struct s_net_connection     net_new_connection(char *ip, int port, int ssl)
         configure_context(con.ctx);
     }
     #endif
+
+    // Créer un socket
+    con.sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (con.sock == INVALID_SOCKET)
+    {
+        WSACleanup();
+        return (con);
+    }
+
+    // Set up the server address structure
+    con.server.sin_family = AF_INET;
+    con.server.sin_port = htons(9050); // Port number
+    con.server.sin_addr.s_addr = inet_addr("127.0.0.1"); // Ip
+    #else
+    // socket create and verification
+    con.sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (con.sock == -1)
+        return (con);
+    #ifdef SSL_ENABLED
+    // Init OpenSSL
+    if (ssl)
+    {
+        con.ssl_enabled = 1;
+        init_openssl();
+        con.ctx = create_context();
+        configure_context(con.ctx);
+    }
+    #endif
+    // assign IP, PORT
+    con.servaddr.sin_family = AF_INET;
+    con.servaddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    con.servaddr.sin_port = htons(9050);
+    #endif
+    con.onion = string_strdup(host);
+    return (con);
+}
+
+struct s_net_connection     net_new_connection(char *ip, int port, int ssl)
+{
+    struct s_net_connection     con;
+
+    printf("Connecting to [%s] Port: %d\n", ip, port);
+    memset(&con, 0, sizeof(struct s_net_connection));
+    if (!ip || port < 0)
+        return (con);
+    con.port = port;
+    strncpy(con.ip, ip, 16);
+    #ifdef _WIN32
+    // Initialize Winsock
+    if (WSAStartup(MAKEWORD(2, 2), &con.wsaData) != 0)
+    {
+        printf("WSAStartup failed.\n");
+        return (con);
+    }
+    #ifdef SSL_ENABLED
+    // Init OpenSSL
+    if (ssl)
+    {
+        con.ssl_enabled = 1;
+        init_openssl();
+        con.ctx = create_context();
+        configure_context(con.ctx);
+    }
+    #endif
     // Create a socket
     con.sock = socket(AF_INET, SOCK_STREAM, 0);
     if (con.sock == INVALID_SOCKET)
     {
+        printf("Invalid socket.\n");
         WSACleanup();
         return (con);
     }
@@ -1292,9 +1632,12 @@ struct s_net_connection     net_new_connection(char *ip, int port, int ssl)
     con.server.sin_addr.s_addr = inet_addr(ip); // Ip
     #else
     // socket create and verification
-    con.sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (con.sockfd == -1)
+    con.sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (con.sock == -1)
+    {
+        printf("Invalid socket.\n");
         return (con);
+    }
     #ifdef SSL_ENABLED
     // Init OpenSSL
     if (ssl)
@@ -1311,6 +1654,211 @@ struct s_net_connection     net_new_connection(char *ip, int port, int ssl)
     con.servaddr.sin_port = htons(port);
     #endif
     return (con);
+}
+
+/// Socks5
+
+#define SOCKS5_VERSION 0x05
+#define SOCKS5_CMD_CONNECT 0x01
+#define SOCKS5_RESERVED 0x00
+#define SOCKS5_ATYP_DOMAIN 0x03
+
+void            net_socks5_display_reply(char rep)
+{
+    switch (rep)
+    {
+        /*
+             o  X'01' general SOCKS server failure
+             o  X'02' connection not allowed by ruleset
+             o  X'03' Network unreachable
+             o  X'04' Host unreachable
+             o  X'05' Connection refused
+             o  X'06' TTL expired
+             o  X'07' Command not supported
+             o  X'08' Address type not supported
+             o  X'09' to X'FF' unassigned
+        */
+        case 0:
+            printf("Succeeded\n");
+            break;
+        case 1:
+            printf("general SOCKS server failure\n");
+            break;
+        case 2:
+            printf("connection not allowed by ruleset\n");
+            break;
+        case 3:
+            printf("Network unreachable\n");
+            break;
+        case 4:
+            printf("Host unreachable\n");
+            break;
+        case 5:
+            printf("Connection refused\n");
+            break;
+        case 6:
+            printf("TTL expired\n");
+            break;
+        case 7:
+            printf("Command not supported\n");
+            break;
+        case 8:
+            printf("Address type not supported\n");
+            break;
+        default:
+            printf("Unknown\n");
+    }
+}
+
+int         net_socks5_connect_host(t_net_connection *con, char *host)
+{
+    unsigned char   buf[256];
+    int             len;
+
+    if (!con || !host)
+        return (1);
+
+    printf("Sock5 Authentication\n");
+    // Authentification (pas d'authentification)
+    buf[0] = SOCKS5_VERSION; // Version SOCKS5
+    buf[1] = 0x01;           // Nombre de méthodes d'authentification
+    buf[2] = 0x00;           // Méthode "Pas d'authentification"
+    if (send(con->sock, buf, 3, 0) < 0) {
+        perror("send");
+        close(con->sock);
+        return (1);
+    }
+    memset(buf, 0, 256);
+    printf("Waiting...\n");
+    // Recevoir la réponse du proxy
+    if (recv(con->sock, buf, 2, 0) < 0) {
+        perror("recv");
+        close(con->sock);
+        return (1);
+    }
+    printf("Sock5 version : [%d]\n", buf[0]);
+    printf("Response : [%d - ", buf[1]);
+    switch (buf[1])
+    {
+        case 0:
+            printf("NO AUTHENTICATION REQUIRED]\n");
+            break;
+        case 1:
+            printf("GSSAPI]\n");
+            break;
+        case 2:
+            printf("USERNAME/PASSWORD]\n");
+            break;
+        case 0xff:
+            printf("NO ACCEPTABLE METHODS]\n");
+            break;
+        default:
+        {
+            if (buf[1] >= 3 && buf[1] <= 0x7f)
+                printf("IANA ASSIGNED]\n");
+            else if (buf[1] >= 0x80 && buf[1] <= 0xfe)
+                printf("RESERVED FOR PRIVATE METHODS]\n");
+            else
+                printf("Unknown]\n");
+        }
+    }
+    // Vérifier la réponse
+    if (buf[0] != SOCKS5_VERSION || buf[1] != 0x00) {
+        printf("SOCKS5 authentication failed\n");
+        close(con->sock);
+        return (1);
+    }
+
+    // Préparer la requête de connexion
+    len = strlen(host);
+    buf[0] = SOCKS5_VERSION; // Version
+    buf[1] = SOCKS5_CMD_CONNECT; // Command
+    buf[2] = SOCKS5_RESERVED; // Reserved
+    buf[3] = SOCKS5_ATYP_DOMAIN; // Address type (domain)
+    buf[4] = len; // Length of domain name
+    memcpy(&buf[5], host, len); // Domain name
+    // Set the destination port (2 bytes, network byte order)
+    buf[5 + len] = (con->port >> 8) & 0xFF; // High byte
+    buf[6 + len] = con->port & 0xFF;        // Low byte
+
+    printf("Sending request.\n");
+    printf("[%d][%d][%d][%d]\n", buf[0], buf[1], buf[2], buf[3]);
+    printf("Length [%d]\n", buf[4]);
+    debug_string(buf + 5, buf[4]);
+    printf("Port [%d]\n", con->port);
+    // Envoyer la requête de connexion
+    if (send(con->sock, buf, 7 + len, 0) < 0)
+    {
+        perror("send");
+        close(con->sock);
+        return (1);
+    }
+
+    printf("Waiting...\n");
+    // Recevoir la réponse du proxy
+    if (recv(con->sock, buf, 10, 0) < 0)
+    {
+        perror("recv");
+        close(con->sock);
+        return (1);
+    }
+
+    printf("Received.\n");
+    // Vérifier la réponse
+    printf("Sock5 version : [%d]\n", buf[0]);
+    printf("Response : [%d]\n", buf[1]);
+    if (buf[1] != 0x00) {
+        printf("SOCKS5 connection failed\n");
+        close(con->sock);
+        net_socks5_display_reply(buf[1]);
+        return (1);
+    }
+
+    printf("Address type of following address: ");
+    switch (buf[3])
+    {
+        case 1:
+            printf("IPv4\n");
+            break;
+        case 2:
+            printf("Domain name\n");
+            break;
+        case 3:
+            printf("IPv6\n");
+            break;
+        default:
+            printf("Unknown [%d]\n", buf[3]);
+    }
+
+    // Address type
+    unsigned char atyp = buf[3];
+    char bound_address[INET6_ADDRSTRLEN]; // Buffer for the bound address
+    unsigned short bound_port;
+
+    // Parse the bound address based on the address type
+    if (atyp == 0x01) { // IPv4
+        struct in_addr addr;
+        memcpy(&addr, &buf[4], sizeof(addr));
+        inet_ntop(AF_INET, &addr, bound_address, sizeof(bound_address));
+        bound_port = (buf[8] << 8) | buf[9]; // Port in network byte order
+    } else if (atyp == 0x03) { // Domain name
+        unsigned char domain_length = buf[4];
+        memcpy(bound_address, &buf[5], domain_length);
+        bound_address[domain_length] = '\0'; // Null-terminate the string
+        bound_port = (buf[5 + domain_length] << 8) | buf[6 + domain_length];
+    } else if (atyp == 0x04) { // IPv6
+        struct in6_addr addr6;
+        memcpy(&addr6, &buf[4], sizeof(addr6));
+        inet_ntop(AF_INET6, &addr6, bound_address, sizeof(bound_address));
+        bound_port = (buf[20] << 8) | buf[21]; // Port in network byte order
+    } else {
+        printf("Unsupported address type: %d\n", atyp);
+        return (1); // Unsupported address type
+    }
+
+    // Print the bound address and port
+    printf("Connected to %s:%u\n", bound_address, bound_port);
+    return (0);
 }
 
 int             net_connect(t_net_connection *con)
@@ -1338,6 +1886,14 @@ int             net_connect(t_net_connection *con)
             WSACleanup();
             return (1);
         }
+        if (con->protocol == PROTOCOL_SOCKS5)
+        {
+            if (net_socks5_connect_host(con, con->onion))
+            {
+                printf("Connect Socks5 failed.\n");
+                return (1);
+            }
+        }
     }
     #else
     #ifdef SSL_ENABLED
@@ -1354,8 +1910,23 @@ int             net_connect(t_net_connection *con)
     #endif
     {
         // connect the client socket to server socket
-        if (connect(con->sockfd, (SA*)&con->servaddr, sizeof(con->servaddr)) != 0)
+        if (connect(con->sock, (SA*)&con->servaddr, sizeof(con->servaddr)) != 0)
+        {
+            printf("Connect failed.\n");
             return (1);
+        }
+        if (con->protocol == PROTOCOL_SOCKS5 && con->onion)
+        {
+            char *onion;
+            onion = url_get_domain(con->onion);
+            if (net_socks5_connect_host(con, con->onion))
+            {
+                FREE(onion);
+                printf("Connect Socks5 failed.\n");
+                return (1);
+            }
+            FREE(onion);
+        }
     }
     #endif
     con->connected = 1;
@@ -1390,9 +1961,14 @@ int             net_disconnect(t_net_connection *con)
         cleanup_openssl();
     }
     #endif // SSL_ENABLED
-    close(con->sockfd);
+    close(con->sock);
     #endif
     con->connected = 0;
+    if (con->onion)
+    {
+        FREE(con->onion);
+        con->onion = NULL;
+    }
     return (0);
 }
 
@@ -1434,21 +2010,22 @@ int             net_send(t_net_connection *con, char *data, uint *length)
     return (0);
     #else
     if (length)
-        write(con->sockfd, data, *length);
+        write(con->sock, data, *length);
     else
-        write(con->sockfd, data, strlen(data));
+        write(con->sock, data, strlen(data));
     #endif
     return (0);
 }
 
 char            *net_recv(t_net_connection *con, uint *length)
 {
-    size_t          rd;
+    int             rd;
     struct s_buf    readed;
     struct s_buf    string;
-    char            buff[STRING_SIZE];
+    #define NET_BUF_SIZE 2920
+    char            buff[NET_BUF_SIZE];
 
-    if (!con)
+    if (!con) // Netcode
         return (NULL);
     if (con->connected == 0 && net_connect(con))
         return (NULL);
@@ -1458,11 +2035,13 @@ char            *net_recv(t_net_connection *con, uint *length)
     string = buffer_new(1, 0);
     printf("Receiving\n");
     #ifdef _WIN32
-    while ((rd = recv(con->sock, buff, STRING_SIZE, 0)) > 0)
+    while ((rd = recv(con->sock, buff, NET_BUF_SIZE, 0)) > 0)
     #else
-    while ((rd = read(con->sockfd, buff, STRING_SIZE)) > 0)
+    while ((rd = read(con->sock, buff, NET_BUF_SIZE)) > 0)
     #endif
     {
+        //printf(">");
+        printf("> %u\n", rd);
         readed.size = rd;
         if (length)
             *length += rd;
@@ -1471,9 +2050,14 @@ char            *net_recv(t_net_connection *con, uint *length)
             buffer_free(&string);
             return (NULL);
         }
+        /// Batman
+        //if (rd != NET_BUF_SIZE)
+        //    break;
     }
+    printf("\n");
     if (rd == -1)
     {
+        printf("Transmission error\n");
         buffer_free(&string);
         return (NULL);
     }
@@ -1757,8 +2341,11 @@ void                    *buffer_free_param_list(t_buf *list)
     while (++i < list->size)
     {
         param = *((t_buf_param **)buffer_get_index(list, i));
+        DEBUG //
         buffer_free_param(param);
+        DEBUG //
         FREE(param);
+        DEBUG //
     }
     return (NULL);
 }
@@ -1816,10 +2403,16 @@ void                    http_free_request(t_http_request *request)
 {
     if (!request)
         return ;
-    FREE(request->url);
+    DEBUG //
+    if (request->url)
+        FREE(request->url);
+    DEBUG //
     buffer_free_param_list(&request->param);
+    DEBUG //
     buffer_free_param_list(&request->header);
+    DEBUG //
     http_free_content(&request->content);
+    DEBUG //
 }
 
 struct s_http_request   http_new_request(char *url, char *method, t_buf *param, t_buf *header, t_http_content *content)
@@ -1866,88 +2459,6 @@ struct s_buf    buffer_new_param_list(int count, ...)
     }
     va_end(args);
     return (list);
-}
-
-char     *url_get_proto(char *url)
-{
-    char        *proto;
-    char        *endofstring;
-    uint        size;
-
-    if (!url)
-        return (NULL);
-    endofstring = url;
-    while (*endofstring && *endofstring != ':')
-        endofstring++;
-    if (!*endofstring)
-        return (NULL);
-    size = endofstring - url;
-    if (!(proto = ALLOC(size + 1)))
-        return (NULL);
-    memset(proto, 0, size + 1);
-    return (strncpy(proto, url, size));
-}
-
-char     *url_get_host(char *url)
-{
-    char        *host;
-    char        *endofstring;
-    uint        size;
-
-    if (!url)
-        return (NULL);
-    while (*url && *url != ':')
-        url++;
-    if (!*url)
-        return (NULL);
-    url++;
-    endofstring = url;
-    while (*endofstring && *endofstring == '/')
-        endofstring++;
-    if (!*endofstring || endofstring - url != 2 || !(url = endofstring))
-        return (NULL);
-    endofstring = url;
-    while (*endofstring && *endofstring != '/' && *endofstring != ':')
-        endofstring++;
-    if (!*endofstring)
-        return (NULL);
-    size = endofstring - url;
-    if (!(host = ALLOC(size + 1)))
-        return (NULL);
-    memset(host, 0, size + 1);
-    return (strncpy(host, url, size));
-}
-
-int         url_get_port_proto(char *proto)
-{
-    if (!proto)
-        return (-1);
-    if (strncasecmp(proto, "http\0", strlen("http") + 1) == 0)
-        return (80);
-    if (strncasecmp(proto, "https\0", strlen("https") + 1) == 0)
-        return (443);
-    if (strncasecmp(proto, "ftp\0", strlen("ftp") + 1) == 0)
-        return (21);
-    if (strncasecmp(proto, "sftp\0", strlen("sftp") + 1) == 0)
-        return (22);
-    if (strncasecmp(proto, "ssh\0", strlen("ssh") + 1) == 0)
-        return (22);
-    return (-1);
-}
-
-uint        string_count_char(char *str, char c, uint max)
-{
-    uint        count;
-    uint        i;
-
-    if (!str)
-        return (0);
-    count = 0;
-    i = -1;
-    while (str[++i] && i < max)
-        if (str[i] == c)
-            count++;
-    return (count);
 }
 
 int         url_get_port(char *url)
@@ -2016,7 +2527,11 @@ char     *url_get_route(char *url)
     if (!*endofstring)
         return (NULL);
     url = endofstring;
-    size = strlen(url);
+    while (*endofstring && *endofstring != '#') // Bad request
+        endofstring++;
+    size = endofstring - url;
+    //else
+    //    size = strlen(url);
     if (!(route = ALLOC(size + 1)))
         return (NULL);
     memset(route, 0, size + 1);
@@ -2155,6 +2670,43 @@ int                             url_is_ipv4(char *host)
     return (1);
 }
 
+int                 url_host_is_onion(char *host)
+{
+    char            *prev;
+    char            *ptr;
+
+    if (!host)
+        return (0);
+    ptr = host + strlen(host);
+    while (*ptr != '.')
+        ptr--;
+    if (strncmp(ptr, ".onion", strlen(".onion")) != 0)
+        return (0);
+    if (string_count_char(host, '.', strlen(host)) == 1)
+    {
+        ptr = host;
+        while (*ptr != '.')
+        {
+            if (!is_alphanum(*ptr))
+                return (0);
+            if (!*ptr)
+                return (0);
+            ptr++;
+        }
+    }
+    else
+    {
+        ptr--;
+        while (*ptr != '.')
+        {
+            if (!is_alphanum(*ptr))
+                return (0);
+            ptr--;
+        }
+    }
+    return (1);
+}
+
 struct s_net_connection         url_new_connection(char *url)
 {
     struct s_net_connection     con;
@@ -2172,6 +2724,16 @@ struct s_net_connection         url_new_connection(char *url)
             FREE(host);
             return (con);
         }
+        con = net_new_connection(ip, url_get_port(url), url_is_https(url));
+        FREE(ip);
+    }
+    else if (url_host_is_onion(host))
+    {
+        printf("Establishing TOR connection.\n");
+        // Onion
+        DEBUG //
+        con = net_new_onion_connection(host, url_get_port(url), url_is_https(url));
+        FREE(host);
     }
     else
     {
@@ -2180,9 +2742,10 @@ struct s_net_connection         url_new_connection(char *url)
             FREE(host);
             return (con);
         }
+        con = net_new_connection(ip, url_get_port(url), url_is_https(url));
+        FREE(ip);
+        FREE(host);
     }
-    con = net_new_connection(ip, url_get_port(url), url_is_https(url));
-    FREE(ip);
     return (con);
 }
 
@@ -2208,6 +2771,7 @@ char            *http_send_request(t_http_request *request, uint *recv_length)
     char                    *string;
     char                    *route;
     char                    *host;
+    char                    *hostname;
     char                    *ret;
 
     if (!request)
@@ -2217,6 +2781,7 @@ char            *http_send_request(t_http_request *request, uint *recv_length)
     con = url_new_connection(request->url);
     if (net_connect(&con))
         return (NULL);
+    DEBUG //
     printf("Url [%s]\n", request->url);
     if (!(host = url_get_host(request->url)))
         return (NULL);
@@ -2246,13 +2811,22 @@ char            *http_send_request(t_http_request *request, uint *recv_length)
     }
     http = string_stradd(http, " HTTP/1.1\r\n");
     printf("Headers :\n");
-    if (!url_is_ipv4(host))
+    if (!url_is_ipv4(request->url) && !buffer_param_get_var_buf_case(&request->header, "Host") && (hostname = url_get_host(request->url)))
+    {
+        host = string_stradd(NULL, "Host='");
+        host = string_stradd(host, hostname);
+        host = string_stradd(host, "'");
+        FREE(host);
+        FREE(hostname);
+    }
+    /*if (!url_is_ipv4(host))
     {
         http = string_stradd(http, "Host: ");
         http = string_stradd(http, host);
         http = string_stradd(http, "\r\n");
     }
     FREE(host);
+    */
     if (strlen(request->content.type) > 0)
     {
         http = string_stradd(http, "Content-Type: ");
@@ -2306,7 +2880,6 @@ char            *http_send_request(t_http_request *request, uint *recv_length)
         }
     }
     http = string_stradd(http, "\r\n\r\n\r\n");
-    ///printf("%s\n", http);
     ret = net_send_recv(&con, http, NULL, recv_length);
     FREE(http);
     net_disconnect(&con);
@@ -2495,7 +3068,7 @@ struct s_http_response         http_new_response(char *http)
         }
         if (strncasecmp(param->name, "Content-Type", strlen("Content-Type")) == 0)
         {
-            strncpy(response.content_type, param->name, STRING_SIZE);
+            strncpy(response.content_type, param->data.buf, STRING_SIZE);
             buffer_push(&response.header, &param);
             //buffer_free_param(param);
             //FREE(param);
@@ -2521,9 +3094,8 @@ struct s_http_response         http_new_response(char *http)
     /// TODO
     /// Batman
     //debug_string(ptr, 10);
-    if (0 && response.content_length != 0)
+    if (1 && response.content_length != 0)
     {
-        DEBUG //
         ///endofstring = string_goto(ptr, '\0');
         endofstring = ptr + response.content_length;
         if (!(response.buf = ALLOC(response.content_length + 1)))
@@ -2538,7 +3110,7 @@ struct s_http_response         http_new_response(char *http)
     else
     {
         response.content_length = strlen(ptr);
-        response.buf = strdup(ptr);
+        response.buf = string_strdup(ptr);
     }
     FREE(res);
     return (response);
@@ -2554,16 +3126,60 @@ int                 url_is_relative(char *url)
     return (0);
 }
 
+char                *url_get_directory(char *url)
+{
+    char        *endofstring;
+    char        *proto;
+    char        *host;
+
+    if (!url)
+        return (NULL);
+    if (!(host = url_get_host(url)))
+        return (NULL);
+    if (!(proto = url_get_proto(url)))
+    {
+        FREE(host);
+        return (NULL);
+    }
+    url += strlen(host) + strlen(proto) + strlen("://");
+    FREE(host);
+    FREE(proto);
+    endofstring = url;
+    while (*endofstring)
+        endofstring++;
+    while (*endofstring != '/')
+        endofstring--;
+    endofstring++;
+    return (string_duplicate(url, endofstring - url));
+}
+
+char                *url_directory_up(char *directory)
+{
+    char            *endofstring;
+
+    if (!(endofstring = directory))
+        return (NULL);
+    while (*endofstring)
+        endofstring++;
+    endofstring--;
+    if (*endofstring == '/')
+        endofstring--;
+    while (*endofstring != '/' && endofstring != directory)
+        endofstring--;
+    return (string_duplicate(directory, endofstring - directory));
+}
+
 char                *url_get_full(char *src, char *relative)
 {
     char        *full;
     char        *proto;
     char        *host;
+    char        *directory;
 
     if (!src || !relative)
         return (NULL);
     if (!url_is_relative(relative))
-        return (strdup(relative));
+        return (string_strdup(relative));
     if (!(host = url_get_host(src)))
         return (NULL);
     if (!(proto = url_get_proto(src)))
@@ -2574,44 +3190,87 @@ char                *url_get_full(char *src, char *relative)
     full = string_stradd(NULL, proto);
     full = string_stradd(full, "://");
     full = string_stradd(full, host);
-    if (*relative != '/')
-        full = string_stradd(full, "/");
-    full = string_stradd(full, relative);
-    FREE(proto);
     FREE(host);
+    FREE(proto);
+    if (*relative == '/')
+        return (string_stradd(full, relative));
+    if (!(directory = url_get_directory(src)))
+    {
+        FREE(full);
+        return (NULL);
+    }
+    if (strncmp(relative, "../", strlen("../")) == 0)
+    {
+        char        *updir;
+        char        *dir;
+        char        *relptr;
+
+        relptr = relative;
+        dir = string_strdup(directory);
+        while (strncmp(relptr, "../", strlen("../")) == 0)
+        {
+            relptr += strlen("../");
+            if (!(updir = url_directory_up(dir)))
+            {
+                FREE(dir);
+                FREE(directory);
+                FREE(full);
+                return (NULL);
+            }
+            FREE(dir);
+            dir = updir;
+        }
+        full = string_stradd(full, dir);
+        full = string_stradd(full, "/");
+        full = string_stradd(full, relptr);
+    }
+    else
+    {
+        full = string_stradd(full, directory);
+        FREE(directory);
+        full = string_stradd(full, relative);
+    }
     return (full);
 }
 
-struct s_http_response  web_get_page(char *url, t_http_request *out)
+struct s_http_response      web_get_page(char *url, t_http_request *out)
 {
     struct s_buf            header;
     struct s_http_request   request;
     struct s_http_response  response;
     struct s_http_response  redirect;
+    t_buf_param             *param;
     char                    *recv;
     char                    *host;
     char                    *hostname;
 
     memset(&response, 0, sizeof(struct s_http_response));
-    printf("GET_PAGE [%s]\n", url); //
+    header = buffer_new_param_list(1,
+                                   //"Accept='text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'",
+                                   //"Accept-Encoding='gzip, deflate, br, zstd'",
+                                   //"Accept-Language='fr,fr-FR;q=0.8,en-US;q=0.5,en;q=0.3'",
+                                   //"Priority='u=0, i'",
+                                   //"Connection='keep-alive'",
+                                   "User-Agent='custom'");
     if (!url_is_ipv4(url) && (hostname = url_get_host(url)))
     {
         host = string_stradd(NULL, "Host='");
         host = string_stradd(host, hostname);
         host = string_stradd(host, "'");
-        header = buffer_new_param_list(2, "User-Agent='custom'", host);
+        param = buffer_new_param(host, NULL);
+        buffer_push(&header, &param);
         FREE(host);
         FREE(hostname);
     }
-    else
-        header = buffer_new_param_list(1, "User-Agent='custom'");
     request = http_new_request(url, "GET", NULL, &header, NULL);
+    if (out)
+        memcpy(out, &request, sizeof(struct s_http_request));
     if (!(recv = http_send_request(&request, NULL)))
     {
-        http_free_request(&request);
+        if (!out)
+            http_free_request(&request);
         return (response);
     }
-    printf("RECV [%s]\n", recv); //
     response = http_new_response(recv);
     FREE(recv);
     if (response.code == 301 || response.code == 302)
@@ -2622,7 +3281,7 @@ struct s_http_response  web_get_page(char *url, t_http_request *out)
         if (url_is_relative(location_url))
             full_url = url_get_full(request.url, location_url);
         else
-            full_url = strdup(location_url);
+            full_url = string_strdup(location_url);
         if (strncmp(
                     request.url,
                     full_url,
@@ -2631,7 +3290,7 @@ struct s_http_response  web_get_page(char *url, t_http_request *out)
         {
             if (out)
             {
-                http_display_request(&request);
+                //http_display_request(&request); //
                 memcpy(out, &request, sizeof(struct s_http_request));
             }
             else
@@ -2644,9 +3303,7 @@ struct s_http_response  web_get_page(char *url, t_http_request *out)
         http_free_response(&response);
         return (redirect);
     }
-    if (out)
-        memcpy(out, &request, sizeof(struct s_http_request));
-    else
+    if (!out)
         http_free_request(&request);
     return (response);
 }
@@ -2657,6 +3314,7 @@ typedef struct s_web_node
     struct s_http_response  response;
     struct s_web_node       *parent;
     struct s_buf            child;
+    struct s_html_node      html;
 }               t_web_node;
 
 void            web_free_node(t_web_node *node)
@@ -2673,6 +3331,8 @@ void            web_free_node(t_web_node *node)
         web_free_node(child);
         FREE(child);
     }
+    buffer_free(&node->child);
+    html_free_node_noroot(&node->html);
 }
 
 char            *http_request_export_xml(t_http_request *request)
@@ -2773,7 +3433,10 @@ void            web_display_node(t_web_node *node)
     {
         //child = buffer_get_index(&node->child, i);
         child = *((t_web_node **)buffer_get_index(&node->child, i));
-        printf("\t(%p)\n", child);
+        printf("\t%u (%p) ", i, child);
+        if (child)
+            printf("[%s]", child->request.url);
+        printf("\n");
     }
 }
 
@@ -2785,26 +3448,18 @@ char            *web_export_xml(t_web_node *node)
 
     if (!node)
         return (NULL);
-    DEBUG //
     xml = string_stradd(NULL, "<web>");
-    DEBUG //
-    web_display_node(node);
-    DEBUG //
-    http_display_request(&node->request); //
-    DEBUG //
+    //web_display_node(node);
+    //http_display_request(&node->request); //
     xml = string_stradd(xml, http_request_export_xml(&node->request));
-    DEBUG //
     xml = string_stradd(xml, http_response_export_xml(&node->response));
-    DEBUG //
     i = -1;
     while (++i < node->child.size)
     {
-        DEBUG //
         child = *((t_web_node **)buffer_get_index(&node->child, i));
         //child = buffer_get_index(&node->child, i);
         xml = string_stradd(xml, web_export_xml(child));
     }
-    DEBUG //
     xml = string_stradd(xml, "</web>");
     return (xml);
 }
@@ -2828,18 +3483,12 @@ t_buf_param             *buffer_copy_param(t_buf_param *param)
 {
     t_buf_param         *copy;
 
-    DEBUG //
     if (!param)
         return (NULL);
     if (!(copy = ALLOC(sizeof(struct s_buf_param))))
         return (NULL);
-    DEBUG //
-    buffer_display_param(param, 4);//
-    DEBUG //
     strncpy(copy->name, param->name, STRING_SIZE - 1);
-    DEBUG //
     copy->data = buffer_copy_buf(&param->data);
-    DEBUG //
     return (copy);
 }
 
@@ -2854,15 +3503,15 @@ struct s_http_response   http_response_import_xml(t_html_node *node)
     uint                    i;
 
     memset(&response, 0, sizeof(struct s_http_request));
-    list = html_find_tag_max(node, "reponse", 1);
+    response.header = buffer_new(sizeof(t_buf_param), 0);
+    list = html_find_tag_max(node, "response", 1);
     if (list.size == 0)
         return (response);
     resnode = *((t_html_node **)buffer_get_index(&list, 0));
-    if (!(ptr = buffer_param_get_var_buf(&resnode->param, "version")))
+    if (!(ptr = buffer_param_get_var_buf_alt(&resnode->param, "version")))
         return (response);
     strncpy(response.http_version, ptr, STRING_SIZE - 1);
-
-    if (!(ptr = buffer_param_get_var_buf(&resnode->param, "code")))
+    if (!(ptr = buffer_param_get_var_buf_alt(&resnode->param, "code")))
         return (response);
     response.code = atoi(ptr);
 
@@ -2872,7 +3521,10 @@ struct s_http_response   http_response_import_xml(t_html_node *node)
     while (++i < list.size)
     {
         paramnode = *((t_html_node **)buffer_get_index(&list, i));
-        param = *((t_buf_param **)buffer_get_index(&paramnode->param, i));
+        if (paramnode->param.size == 0)
+            continue;
+        //param = *((t_buf_param **)buffer_get_index(&paramnode->param, 0));
+        param = ((t_buf_param *)buffer_get_index(&paramnode->param, 0));
         if (!(param = buffer_copy_param(param)))
         {
             http_free_response(&response);
@@ -2890,10 +3542,24 @@ struct s_http_response   http_response_import_xml(t_html_node *node)
     }
     resnode = *((t_html_node **)buffer_get_index(&list, 0));
     buffer_free(&list);
-    if (!(response.buf = html_tostring(resnode)))
+    if (strncasecmp(resnode->tag, "content", strlen("content")) != 0)
     {
-        http_free_response(&response);
-        return (response);
+        if (!(response.buf = html_tostring(resnode)))
+        {
+            http_free_response(&response);
+            return (response);
+        }
+    }
+    else
+    {
+        ptr = NULL;
+        i = -1;
+        while (++i < resnode->child.size)
+        {
+            paramnode = buffer_get_index(&resnode->child, i);
+            ptr = string_stradd(ptr, html_tostring(paramnode));
+        }
+        response.buf = ptr;
     }
     return (response);
 }
@@ -2903,29 +3569,32 @@ struct s_http_request   http_request_import_xml(t_html_node *node)
     struct s_http_request   request;
     struct s_buf            list;
     t_buf_param             *param;
+    t_buf_param             *tmp;
     t_html_node             *reqnode;
     t_html_node             *paramnode;
     char                    *ptr;
     uint                    i;
 
     memset(&request, 0, sizeof(struct s_http_request));
+    request.header = buffer_new(sizeof(t_buf_param), 0);
+    request.param = buffer_new(sizeof(t_buf_param), 0);
     list = html_find_tag_max(node, "request", 1);
     if (list.size == 0)
         return (request);
     reqnode = *((t_html_node **)buffer_get_index(&list, 0));
-    if (!(ptr = buffer_param_get_var_buf(&reqnode->param, "method")))
+    if (!(ptr = buffer_param_get_var_buf_alt(&reqnode->param, "method")))
         return (request);
     strncpy(request.method, ptr, STRING_SIZE - 1);
-    if (!(ptr = buffer_param_get_var_buf(&reqnode->param, "url")))
+    if (!(ptr = buffer_param_get_var_buf_alt(&reqnode->param, "url")))
         return (request);
-    request.url = strdup(ptr);
+    request.url = string_strdup(ptr);
     buffer_free(&list);
     list = html_find_tag_max(reqnode, "param", 1);
     i = -1;
     while (++i < list.size)
     {
         paramnode = *((t_html_node **)buffer_get_index(&list, i));
-        param = *((t_buf_param **)buffer_get_index(&paramnode->param, i));
+        param = *((t_buf_param **)buffer_get_index(&paramnode->param, 0));
         if (!(param = buffer_copy_param(param)))
         {
             http_free_request(&request);
@@ -2939,8 +3608,7 @@ struct s_http_request   http_request_import_xml(t_html_node *node)
     while (++i < list.size)
     {
         paramnode = *((t_html_node **)buffer_get_index(&list, i));
-        param = buffer_get_index(&paramnode->param, i);
-        //param = *((t_buf_param **)buffer_get_index(&paramnode->param, i));
+        param = buffer_get_index(&paramnode->param, 0);
         if (!(param = buffer_copy_param(param)))
         {
             http_free_request(&request);
@@ -2956,22 +3624,33 @@ t_web_node              *web_import_xml_node(t_html_node *node, t_web_node *pare
     t_html_node         *child;
     t_web_node          *child_web;
     t_web_node          *web;
-    struct s_buf        list;
     uint                i;
 
     if (!node)
         return (NULL);
     if (!(web = ALLOC(sizeof(struct s_web_node))))
         return (NULL);
+    web->child = buffer_new(sizeof(t_web_node), 0);
     web->parent = parent;
+    DEBUG //
     web->request = http_request_import_xml(node);
+    DEBUG //
     web->response = http_response_import_xml(node);
-
-    list = html_find_tag_max(node, "web", 2);
-    i = 0;
-    while (++i < list.size)
+    DEBUG //
+    printf("NODE TAG [%s]\n", node->tag); //
+    ///html_display_node(node, 0);
+    DEBUG //
+    i = -1;
+    while (++i < node->child.size)
     {
-        child = *((t_html_node **)buffer_get_index(&list, i));
+        DEBUG //
+        child = ((t_html_node *)buffer_get_index(&node->child, i));
+        DEBUG //
+        printf("CHILD TAG [%s]\n", child->tag);
+        DEBUG //
+        if (strncasecmp(child->tag, "web", strlen("web")) != 0)
+            continue;
+        DEBUG //
         if (!(child_web = web_import_xml_node(child, web)))
         {
             web_free_node(web);
@@ -2980,23 +3659,24 @@ t_web_node              *web_import_xml_node(t_html_node *node, t_web_node *pare
         }
         buffer_push(&web->child, &child_web);
     }
-    buffer_free(&list);
     return (web);
 }
 
 t_web_node          *web_import_xml(char *xml)
 {
-    t_web_node              *web;
-    t_html_node             *root;
+    t_web_node             *web;
+    t_html_node            *root;
 
+    if (!xml)
+        return (NULL);
+    printf("Parsing XML\n");
     if (!(root = html_new_node(xml, NULL, NULL)))
         return (NULL);
-    //html_free_node(root);
-    //return (NULL);
+    //html_display_node(root, 0); //
+    printf("XML to Web node\n");
     web = web_import_xml_node(root, NULL);
-    DEBUG //
-    html_display_node(root, 0); // DEBUG
-    html_free_node(root);
+    // Tarzan
+    ///html_free_node(root); // Crash Leak
     return (web);
 }
 
@@ -3016,7 +3696,8 @@ int                 web_url_exists(t_web_node *node, char *url)
 
     if (!node || !url)
         return (0);
-    if (strncmp(node->request.url, url, strlen(url)) == 0)
+    if (node->request.url && /// TEST DEBUG ??
+        strncmp(node->request.url, url, strlen(url)) == 0)
         return (1);
     i = -1;
     while (++i < node->child.size)
@@ -3026,6 +3707,42 @@ int                 web_url_exists(t_web_node *node, char *url)
             return (1);
     }
     return (0);
+}
+
+t_web_node          *web_new_node_nochild(char *url, t_web_node *parent)
+{
+    t_web_node              *node;
+    t_web_node              *child;
+    struct s_html_node      root;
+    struct s_http_response  page;
+    struct s_buf            list;
+    char                    *full_url;
+    t_html_node             *tag;
+    t_buf_param             *param;
+    uint                    i;
+    uint                    j;
+
+    if (!url)
+        return (NULL);
+    ///printf("Press enter to continue\n");//
+    ///getchar(); //
+    printf("New node URL [%s]\n", url); //
+    if (!(node = ALLOC(sizeof(struct s_web_node))))
+        return (NULL);
+    memset(node, 0, sizeof(struct s_web_node));
+    node->parent = parent;
+    page = web_get_page(url, &node->request);
+    if (page.code == 0)
+    {
+        web_free_node(node);
+        return (NULL);
+    }
+    root = html_parse(page.buf);
+    //html_display_node(&root, 0);
+    node->html = root;
+    node->response = page;
+    node->child = buffer_new(sizeof(t_web_node), 0);
+    return (node);
 }
 
 t_web_node          *web_new_node(char *url, t_web_node *parent, uint maxdepth)
@@ -3043,14 +3760,22 @@ t_web_node          *web_new_node(char *url, t_web_node *parent, uint maxdepth)
 
     if (!url || maxdepth == 0)
         return (NULL);
+    ///printf("Press enter to continue\n");//
+    ///getchar(); //
+    printf("New node URL [%s]\n", url); //
     if (!(node = ALLOC(sizeof(struct s_web_node))))
         return (NULL);
     memset(node, 0, sizeof(struct s_web_node));
     node->parent = parent;
     page = web_get_page(url, &node->request);
-
+    if (page.code == 0)
+    {
+        web_free_node(node);
+        return (NULL);
+    }
     root = html_parse(page.buf);
-    html_display_node(&root, 0);
+    //html_display_node(&root, 0);
+    node->html = root;
 
     node->response = page;
 
@@ -3071,12 +3796,14 @@ t_web_node          *web_new_node(char *url, t_web_node *parent, uint maxdepth)
             {
                 if (param->data.buf && *((char *)param->data.buf) == '#')
                     continue;
-                printf("HREF == [%s]\n", (char *)param->data.buf); //
-                printf("Press enter to continue\n");//
-                getchar();
+                if (strncasecmp(param->data.buf, "mailto:", strlen("mailto:")) == 0)
+                    continue;
+                ///printf("HREF == [%s]\n", (char *)param->data.buf); //
                 full_url = url_get_full(url, param->data.buf);
-                if (web_url_exists(web_root_node(node), full_url))
+                if (web_url_exists(web_root_node(node), full_url) ||
+                    web_url_exists(node, full_url))
                 {
+                    ///printf("Exist [%s]\n", full_url);
                     FREE(full_url);
                     continue;
                 }
@@ -3087,6 +3814,7 @@ t_web_node          *web_new_node(char *url, t_web_node *parent, uint maxdepth)
             }
         }
     }
+    buffer_free(&list);
     return (node);
 }
 
@@ -3110,22 +3838,634 @@ void            web_shell_display_help(void)
     printf("child : Display childs\n");
     printf("goto : Goto child\n");
     printf("export : Export to XML\n");
+    printf("save : Export everything to XML\n");
     printf("content : View node content\n");
+    printf("text : Display all text\n");
+    printf("texttag : Display text that match with a tagname\n");
+    printf("web_get_page : Add new nodes\n");
+    printf("links : Display page links\n");
+    printf("expand : Download all sublinks of node\n");
+    printf("expandsamesite : Download all sublinks of same host of node\n");
+    printf("expandnotsamesite : Download all sublinks of not the same host of node\n");
+    printf("expandallsamesite : Download recursively all sublinks of not the same host of node\n");
+    printf("expandallnotsamesite : Download recursively all sublinks of not the same host of node\n");
+    printf("mail : Display all mails of node tree\n");
     printf("----------------\n");
+}
+
+int             web_shell_command_expand(char *input, t_web_node *node)
+{
+    t_web_node              *child;
+    struct s_buf            list;
+    char                    *full_url;
+    t_html_node             *tag;
+    t_buf_param             *param;
+    uint                    i;
+    uint                    j;
+
+    // Expand
+    if (!node || !input)
+        return (1);
+    list = html_find_tag(&node->html, "a");
+    i = -1;
+    while (++i < list.size)
+    {
+        tag = *((t_html_node **)buffer_get_index(&list, i));
+        j = -1;
+        while (++j < tag->param.size)
+        {
+            param = buffer_get_index(&tag->param, j);
+            if (strncasecmp(param->name, "href", STRING_SIZE) == 0)
+            {
+                if (param->data.buf && *((char *)param->data.buf) == '#')
+                    continue;
+                if (strncasecmp(param->data.buf, "mailto:", strlen("mailto:")) == 0)
+                    continue;
+                full_url = url_get_full(node->request.url, param->data.buf);
+                if (web_url_exists(web_root_node(node), full_url) ||
+                    web_url_exists(node, full_url))
+                {
+                    FREE(full_url);
+                    continue;
+                }
+                child = web_new_node_nochild(full_url, node);
+                if (child)
+                    buffer_push(&node->child, &child);
+                FREE(full_url);
+            }
+        }
+    }
+    buffer_free(&list);
+    return (0);
+}
+
+int             url_same_host(char *urla, char *urlb)
+{
+    char        *hosta;
+    char        *hostb;
+
+    if (!urla || !urlb)
+        return (0);
+    if (!(hosta = url_get_host(urla)))
+        return (0);
+    if (!(hostb = url_get_host(urlb)))
+    {
+        FREE(hosta);
+        return (0);
+    }
+    if (strncasecmp(hosta, hostb, strlen(hostb)) == 0)
+    {
+        FREE(hosta);
+        FREE(hostb);
+        return (1);
+    }
+    FREE(hosta);
+    FREE(hostb);
+    return (0);
+}
+
+int             web_shell_command_expand_samesite(char *input, t_web_node *node)
+{
+    t_web_node              *child;
+    struct s_buf            list;
+    char                    *full_url;
+    t_html_node             *tag;
+    t_buf_param             *param;
+    uint                    i;
+    uint                    j;
+
+    // Expand
+    if (!node || !input)
+        return (1);
+    list = html_find_tag(&node->html, "a");
+    i = -1;
+    while (++i < list.size)
+    {
+        tag = *((t_html_node **)buffer_get_index(&list, i));
+        j = -1;
+        while (++j < tag->param.size)
+        {
+            param = buffer_get_index(&tag->param, j);
+            if (strncasecmp(param->name, "href", STRING_SIZE) == 0)
+            {
+                if (param->data.buf && *((char *)param->data.buf) == '#')
+                    continue;
+                if (strncasecmp(param->data.buf, "mailto:", strlen("mailto:")) == 0)
+                    continue;
+                full_url = url_get_full(node->request.url, param->data.buf);
+                if (!url_same_host(node->request.url, full_url) ||
+                    web_url_exists(web_root_node(node), full_url) ||
+                    web_url_exists(node, full_url))
+                {
+                    FREE(full_url);
+                    continue;
+                }
+                child = web_new_node_nochild(full_url, node);
+                if (child)
+                    buffer_push(&node->child, &child);
+                FREE(full_url);
+                if (!child)
+                {
+                    buffer_free(&list);
+                    return (1);
+                }
+            }
+        }
+    }
+    buffer_free(&list);
+    return (0);
+}
+
+int             web_shell_command_mail(char *input, t_web_node *node)
+{
+        t_web_node              *child;
+    struct s_buf            list;
+    char                    *full_url;
+    t_html_node             *tag;
+    t_buf_param             *param;
+    uint                    i;
+    uint                    j;
+
+    // Expand
+    if (!node || !input)
+        return (1);
+    list = html_find_tag(&node->html, "a");
+    i = -1;
+    while (++i < list.size)
+    {
+        tag = *((t_html_node **)buffer_get_index(&list, i));
+        j = -1;
+        while (++j < tag->param.size)
+        {
+            param = buffer_get_index(&tag->param, j);
+            if (strncasecmp(param->name, "href", STRING_SIZE) == 0)
+            {
+                if (param->data.buf && *((char *)param->data.buf) == '#')
+                    continue;
+                if (strncasecmp(param->data.buf, "mailto:", strlen("mailto:")) != 0)
+                    continue;
+                printf("%s\n", (char *)param->data.buf + strlen("mailto:"));
+            }
+        }
+    }
+    buffer_free(&list);
+    i = -1;
+    while (++i < node->child.size)
+    {
+        child = *((t_web_node **)buffer_get_index(&node->child, i));
+        web_shell_command_mail(input, child);
+    }
+    return (0);
+}
+
+int             web_shell_command_expand_notsamesite(char *input, t_web_node *node)
+{
+    t_web_node              *child;
+    struct s_buf            list;
+    char                    *full_url;
+    t_html_node             *tag;
+    t_buf_param             *param;
+    uint                    i;
+    uint                    j;
+
+    // Expand
+    if (!node || !input)
+        return (1);
+    list = html_find_tag(&node->html, "a");
+    i = -1;
+    while (++i < list.size)
+    {
+        tag = *((t_html_node **)buffer_get_index(&list, i));
+        j = -1;
+        while (++j < tag->param.size)
+        {
+            param = buffer_get_index(&tag->param, j);
+            if (strncasecmp(param->name, "href", STRING_SIZE) == 0)
+            {
+                if (param->data.buf && *((char *)param->data.buf) == '#')
+                    continue;
+                if (strncasecmp(param->data.buf, "mailto:", strlen("mailto:")) == 0)
+                    continue;
+                full_url = url_get_full(node->request.url, param->data.buf);
+                if (url_same_host(node->request.url, full_url) ||
+                    web_url_exists(web_root_node(node), full_url) ||
+                    web_url_exists(node, full_url))
+                {
+                    FREE(full_url);
+                    continue;
+                }
+                child = web_new_node_nochild(full_url, node);
+                if (child)
+                    buffer_push(&node->child, &child);
+                FREE(full_url);
+                if (!child)
+                {
+                    buffer_free(&list);
+                    return (1);
+                }
+            }
+        }
+    }
+    buffer_free(&list);
+    return (0);
+}
+
+int             web_expandallsamesite(t_web_node *node, uint maxdepth)
+{
+    uint        i;
+    t_web_node  *child;
+
+    if (!node)
+        return (1);
+    if (maxdepth <= 0 && maxdepth != -1)
+        return (0);
+    if (web_shell_command_expand_samesite("expandsamesite", node))
+        return (1);
+    i = -1;
+    while (++i < node->child.size)
+    {
+        child = *((t_web_node **)buffer_get_index(&node->child, i));
+        if (web_expandallsamesite(child, maxdepth == -1 ? -1 : maxdepth - 1))
+            return (1);
+    }
+    return (0);
+}
+
+int             web_shell_command_expandallsamesite(char *input, t_web_node *node)
+{
+    char            *ptr;
+
+    if (!input || !node)
+        return (1);
+    if (!(ptr = string_goto(input, ' ')))
+    {
+        printf("Usage: expandallsamesite <maxdepth>\n");
+        return (1);
+    }
+    if (!(ptr = string_goto_alphanum(ptr)))
+    {
+        printf("Usage: expandallsamesite <maxdepth>\n");
+        return (1);
+    }
+    web_expandallsamesite(node, atoi(ptr));
+    return (0);
+}
+
+int             web_expandallnotsamesite(t_web_node *node, uint maxdepth)
+{
+    uint        i;
+    t_web_node  *child;
+
+    if (!node)
+        return (1);
+    if (maxdepth <= 0 && maxdepth != -1)
+        return (0);
+    if (web_shell_command_expand_notsamesite("expandnotsamesite", node))
+        return (1);
+    i = -1;
+    while (++i < node->child.size)
+    {
+        child = *((t_web_node **)buffer_get_index(&node->child, i));
+        if (web_expandallnotsamesite(child, maxdepth == -1 ? -1 : maxdepth - 1))
+            return (1);
+    }
+    return (0);
+}
+
+int             web_shell_command_expandallnotsamesite(char *input, t_web_node *node)
+{
+    char            *ptr;
+
+    if (!input || !node)
+        return (1);
+    if (!(ptr = string_goto(input, ' ')))
+    {
+        printf("Usage: expandallsamesite <maxdepth>\n");
+        return (1);
+    }
+    if (!(ptr = string_goto_alphanum(ptr)))
+    {
+        printf("Usage: expandallsamesite <maxdepth>\n");
+        return (1);
+    }
+    if (web_expandallnotsamesite(node, atoi(ptr)))
+        return (1);
+    return (0);
+}
+
+int             file_write(char *path, char *data, uint *length)
+{
+    int             fd;
+    uint            size;
+	mode_t		    mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+
+    if (!path || !data)
+        return (1);
+    if (length)
+        size = *length;
+    else
+        size = strlen(data);
+    #ifndef _WIN32 /// Linux
+    if ((fd = open(path, O_WRONLY | O_CREAT, mode)) == -1)
+	{
+		printf("Can't open %s\n", path);
+		return (1);
+	}
+    if (write(fd, data, size) == -1)
+    {
+        printf("Write error.");
+        close(fd);
+        return (1);
+    }
+    close(fd);
+    return (0);
+    #else // Windows not implemented
+    return (1);
+    #endif
+}
+
+int             web_shell_command_export(char *input, t_web_node *node)
+{
+    char        *xml;
+    char        *endofstring;
+    char        *filename;
+    char        *ptr;
+
+    DEBUG //
+    if (!node || !input || !(xml = web_export_xml(node)))
+        return (1);
+    if (!(ptr = string_goto_multiple(string_goto(input, ' '), "'\"abcdefghijklmnopqrstuvwxyz")))
+        printf("%s\n", xml);
+    if (*ptr == '\'' || *ptr == '"')
+        filename = html_new_string(ptr, &endofstring);
+    else
+    {
+        if ((endofstring = string_goto(ptr, ' ')))
+            filename = string_duplicate(ptr, endofstring - ptr);
+        else
+            filename = string_strdup(ptr);
+    }
+    if (file_write(filename, xml, NULL))
+    {
+        FREE(filename);
+        FREE(xml);
+        printf("Failed saving XML to %s\n", filename);
+        return (1);
+    }
+    FREE(filename);
+    FREE(xml);
+    return (0);
+}
+
+char            *file_read(char *path, uint *size)
+{
+    mode_t		        mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+    int                 fd;
+	uchar 				buffer[STRING_SIZE * 128];
+	uint 				bytes_read;
+	struct s_buf        out;
+	struct s_buf        src;
+
+	if (!path)
+        return (NULL);
+    printf("Opening [%s]\n", path);
+	if ((fd = open(path, O_RDONLY, mode)) == -1)
+	{
+		printf("Can't open %s\n", path);
+		return (NULL);
+	}
+    printf("Reading\n");
+    out = buffer_new(1, 0);
+	while ((bytes_read = read(fd, (void *)buffer, STRING_SIZE * 128)) != 0)
+	{
+	    //DEBUG //
+	    //debug_string(buffer, STRING_SIZE * 128); //
+	    //DEBUG //
+		if (bytes_read == -1)
+        {
+            DEBUG //
+            buffer_free(&out);
+            buffer_free(&src);
+            close(fd);
+            printf("read error\n");
+            return (NULL);
+        }
+        src = buffer_new(1, bytes_read);
+        memcpy(src.buf, buffer, bytes_read);
+        buffer_concat(&out, &src);
+		buffer_free(&src);
+	}
+	if (size)
+        *size = out.size;
+    return (out.buf);
+}
+
+int             web_shell_command_import(char *input, t_web_node *node)
+{
+    char        *xml;
+    char        *endofstring;
+    char        *filename;
+    char        *ptr;
+    t_web_node  *child;
+
+    if (!node || !input)
+        return (1);
+    if (!(ptr = string_goto_multiple(string_goto(input, ' '), "'\"abcdefghijklmnopqrstuvwxyz")))
+    {
+        printf("Usage: <file>\n");
+        return (1);
+    }
+    if (*ptr == '\'' || *ptr == '"')
+        filename = html_new_string(ptr, &endofstring);
+    else
+    {
+        if ((endofstring = string_goto(ptr, ' ')))
+            filename = string_duplicate(ptr, endofstring - ptr);
+        else
+            filename = string_strdup(ptr);
+    }
+    DEBUG //
+    if (!(xml = file_read(filename, NULL)))
+    {
+        printf("Failed loading XML %s\n", filename);
+        FREE(xml);
+        FREE(filename);
+        return (1);
+    }
+    FREE(filename);
+    printf("Import XML\n");
+    if (!(child = web_import_xml(xml)))
+    {
+        printf("Failed import XML structure.\n");
+        FREE(xml);
+        return (1);
+    }
+    child->parent = node;
+    FREE(xml);
+    if (buffer_push(&node->child, &child))
+    {
+        printf("Error adding child.\n");
+        web_free_node(child);
+        FREE(child);
+        return (1);
+    }
+    return (0);
+}
+
+int             web_shell_command_web_get_page(char *input, t_web_node *node)
+{
+    char        *url;
+    char        *ptr;
+    char        *endofstring;
+    t_web_node  *child;
+
+    if (!node || !input)
+        return (1);
+    if (!(ptr = string_goto_multiple(string_goto(input, ' '), "'\"abcdefghijklmnopqrstuvwxyz")))
+    {
+        printf("Usage: web_get_page <url> <depth>\n");
+        return (1);
+    }
+    if (*ptr == '\'' || *ptr == '"')
+        url = html_new_string(ptr, &endofstring);
+    else
+    {
+        if ((endofstring = string_goto(ptr, ' ')))
+            url = string_duplicate(ptr, endofstring - ptr);
+        else
+        {
+            printf("Usage: web_get_page <url> <depth>\n");
+            return (1);
+        }
+    }
+    if (*endofstring == '\'' || *endofstring == '"')
+        endofstring++;
+    if (!(ptr = string_skipblank(endofstring)))
+    {
+        printf("Usage: web_get_page <url> <depth>\n");
+        return (1);
+    }
+    if (ptr && is_numeric(*ptr))
+    {
+        if ((child = web_new_node(url, node, atoi(ptr))))
+        {
+            if (buffer_push(&node->child, &child))
+                printf("Error pushing new child.\n");
+        }
+    }
+    return (0);
+}
+
+int             buffer_contain_string(t_buf *strbuf, char *string)
+{
+    uint        i;
+    char        *str;
+
+    if (!strbuf)
+        return (-1);
+    i = -1;
+    while (++i < strbuf->size)
+    {
+        str = *((char **)buffer_get_index(strbuf, i));
+        if (strncmp(str, string, strlen(string)) == 0)
+            return (i);
+    }
+    return (-1);
+}
+
+int             web_shell_command_links(char *input, t_web_node *node)
+{
+    struct s_buf        list;
+    t_buf_param         *param;
+    char                *full_url;
+    t_html_node         *tag;
+    char                *text;
+    uint                i;
+    uint                j;
+    struct s_buf        printed;
+
+    if (!node || !input)
+        return (1);
+    printed = buffer_new(sizeof(char *), 0);
+    list = html_find_tag(&node->html, "a");
+    i = -1;
+    while (++i < list.size)
+    {
+        tag = *((t_html_node **)buffer_get_index(&list, i));
+        j = -1;
+        while (++j < tag->param.size)
+        {
+            param = buffer_get_index(&tag->param, j);
+            if (strncasecmp(param->name, "href", STRING_SIZE) == 0)
+            {
+                if (param->data.buf && *((char *)param->data.buf) == '#')
+                    continue;
+                full_url = url_get_full(node->request.url, param->data.buf);
+                if (buffer_contain_string(&printed, full_url) != -1)
+                {
+                    FREE(full_url);
+                    continue;
+                }
+                buffer_push(&printed, &full_url);
+                text = html_get_text(tag);
+                printf("%s - %s\n-------------------------\n", text, full_url);
+                FREE(text);
+            }
+        }
+    }
+    i = -1;
+    while (++i < printed.size)
+    {
+        full_url = *((char **)buffer_get_index(&printed, i));
+        FREE(full_url);
+    }
+    buffer_free(&printed);
+    return (0);
+}
+int             web_shell(t_web_node *node);
+int             web_shell_command_goto(char *input, t_web_node *node)
+{
+    t_web_node      *child;
+    char            *ptr;
+    int             i;
+
+    if (!input || !node)
+        return (0);
+    if ((ptr = string_goto_numeric(input)))
+    {
+        i = atoi(ptr);
+        if (i < node->child.size)
+        {
+            child = *((t_web_node **)buffer_get_index(&node->child, (uint)i));
+            if (!child)
+                printf("Bad child index\n");
+            else if (web_shell(child))
+                return (1);
+        }
+        else
+            printf("Bad child index\n");
+    }
+    else
+        printf("Usage: goto [index]\n");
+    return (0);
 }
 
 int             web_shell(t_web_node *node)
 {
-    char            input[STRING_SIZE]; // Pointeur pour la chaîne de caractères
+    char            input[STRING_SIZE * 16]; // Pointeur pour la chaîne de caractères
     char            *output;
     char            *ptr;
     t_web_node      *child;
     size_t          len;
     uint            i;
 
+    struct s_html_node  html;
+    char                *text;
+    char                *tagname;
+
     if (!node)
         return (0);
-    memset(input, 0, STRING_SIZE);
+    memset(input, 0, STRING_SIZE * 16);
     input[0] = 'a';
     while (strncmp(input, "exit", strlen("exit")) != 0 && strncmp(input, "return", strlen("return")) != 0)
     {
@@ -3161,25 +4501,55 @@ int             web_shell(t_web_node *node)
             }
         }
         if (strncmp(input, "goto", strlen("goto")) == 0)
+            if (web_shell_command_goto(input, node))
+                return (1);
+        if (strncmp(input, "text", len) == 0)
         {
-            if ((ptr = string_goto_numeric(input)))
+            if ((text = html_get_text(&node->html)))
             {
-                i = atoi(ptr);
-                child = *((t_web_node **)buffer_get_index(&node->child, (uint)i));
-                if (!child)
-                    printf("Bad child index\n");
-                else if (web_shell(child))
-                    return (1);
+                printf("%s\n", text);
+                FREE(text);
             }
         }
-        if (strncmp(input, "export", len) == 0)
+        if (strncmp(input, "texttag", strlen("texttag")) == 0)
         {
-            output = web_export_xml(node);
-            printf("%s\n", output);
-            FREE(output);
+            tagname = input;
+            while (*tagname && *tagname != ' ')
+                tagname++;
+            tagname = string_skipblank(tagname);
+            if ((text = html_get_text_tag(&node->html, tagname)))
+            {
+                printf("%s\n", text);
+                FREE(text);
+            }
         }
+        if (strncmp(input, "web_get_page", strlen("web_get_page")) == 0)
+            web_shell_command_web_get_page(input, node);
+        if (strncmp(input, "export", strlen("export")) == 0)
+            web_shell_command_export(input, node);
+        if (strncmp(input, "save", strlen("save")) == 0)
+            web_shell_command_export(input, web_root_node(node));
+        if (strncmp(input, "import", strlen("import")) == 0)
+            web_shell_command_import(input, node);
+        if (strncmp(input, "links", strlen("links")) == 0)
+            web_shell_command_links(input, node);
+        if (strncmp(input, "expand", strlen(input)) == 0)
+            web_shell_command_expand(input, node);
+        if (strncmp(input, "expandsamesite", strlen("expandsamesite")) == 0)
+            web_shell_command_expand_samesite(input, node);
+        if (strncmp(input, "expandnotsamesite", strlen("expandnotsamesite")) == 0)
+            web_shell_command_expand_notsamesite(input, node);
+        if (strncmp(input, "expandallsamesite", strlen("expandallsamesite")) == 0)
+            web_shell_command_expandallsamesite(input, node);
+        if (strncmp(input, "expandallnotsamesite", strlen("expandallnotsamesite")) == 0)
+            web_shell_command_expandallnotsamesite(input, node);
+        if (strncmp(input, "mail", strlen("mail")) == 0)
+            web_shell_command_mail(input, node);
         if (strncmp(input, "content", STRING_SIZE) == 0)
-            printf("%s\n", node->response.buf);
+        {
+            if (node->response.buf)
+                printf("%s\n", node->response.buf);
+        }
     }
     return (0);
 }
@@ -3198,7 +4568,7 @@ void            test_import_export(char *seed)
     t_web_node          *root;
 
     DEBUG //
-    if (!(root = web_new_node(seed, NULL, 2)))
+    if (!(root = web_new_node(seed, NULL, 3)))
         printf("Error\n");
     DEBUG //
     char *xml;
@@ -3231,7 +4601,6 @@ void            test_web(void)
 {
     struct s_http_response  page;
 
-    //page = web_get_page("http://wikipedia.org/");
     page = web_get_page("http://info.cern.ch/", NULL);
     http_display_response(&page);
 
@@ -3293,20 +4662,21 @@ void            test_parser(void)
     int             i;
     char *html = "<!DOCTYPE html>\
     <html param='abc' str='def'>\
+        <!-- TEST1 -->\
+        <!--TEST2 -->\
+        <!--TEST3-->\
+        <!--         TEST4-->\
+        <!--         TEST5             -->\
+        <!--TEST6             -->\
         <p>\
             ghi\
         </p>\
-        <p>\
-            jkl\
-            <a href=\"localhost\">lmn</a>\
-            opq\
-        </p>\
-        <img/>\
-        <img/>\
     </html>";
 
     root = html_parse(html);
 
+    printf("-----------------------\n");//
+    html_display_node(&root, 0);
     printf("-----------------------\n");//
     list = html_find_node_param(&root, "href", "localhostt");
     i = -1;
@@ -3321,15 +4691,284 @@ void            test_parser(void)
 void        test_connection(void)
 {
     struct s_net_connection con;
+    char *host;
 
-    con = net_new_connection("127.0.0.1", 1234, 0);
-    net_send(&con, "Hello", NULL);
+    //char            *onion = "http://juhanurmihxlp77nkq76byazcldy2hlmovfu2epvl5ankdibsot4csyd.onion/";
+    //char            *onion = "http://bbcnewsd73hkzno2ini43t4gblxvycyac5aw4gnv7t2rccijh7745uqd.onion/";
+    char            *onion = "http://hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion/";
+    printf("New onion connection\n");
+    host = url_get_host(onion);
+    printf("Is onion [%d]\n", url_host_is_onion(host));
+    //con = net_new_connection("127.0.0.1", 3128, 0); // Squid
+    con = net_new_onion_connection(host, 80, 0);
+    //con = net_new_connection("127.0.0.1", 9050, 0); //
+    printf("Connecting...\n");
+    if (net_connect(&con))
+    {
+        printf("Connection error\n");
+        return ;
+    }
+    printf("Connected\n");
+
+    char *path = "/index.html";
+        // Préparer la requête HTTP GET
+    char request[1024];
+    snprintf(request, sizeof(request),
+             "GET %s HTTP/1.1\r\n"
+             "Host: %s\r\n"
+             "Connection: close\r\n"
+             "\r\n", path, host);
+
+    printf("REQUEST [%s]\n", request);
+
+    // Envoyer la requête HTTP
+    if (send(con.sock, request, strlen(request), 0) < 0) {
+        perror("Failed to send HTTP request");
+        return;
+    }
+
+    // Lire la réponse HTTP
+    char response[4096];
+    ssize_t bytes_received;
+    while ((bytes_received = recv(con.sock, response, sizeof(response) - 1, 0)) > 0) {
+        response[bytes_received] = '\0'; // Null-terminate the response
+        printf("%s", response); // Afficher la réponse
+    }
+
+    if (bytes_received < 0) {
+        perror("Error receiving response");
+    }
+}
+
+#ifdef _WIN32
+void        test_windows_connection()
+{
+        WSADATA WSAData;
+    SOCKET sock;
+    SOCKADDR_IN sin;
+    char buffer[255];
+    WSAStartup(MAKEWORD(2,0), &WSAData);
+    /* Tout est configuré pour se connecter sur IRC, haarlem, Undernet. */
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    sin.sin_addr.s_addr = inet_addr("127.0.0.1");
+    sin.sin_family = AF_INET;
+    sin.sin_port = htons(1025);
+    printf("Connect : %d\n", connect(sock, (SOCKADDR *)&sin, sizeof(sin)));
+    buffer[0] = 'a';
+    buffer[1] = '\0';
+    send(sock, buffer, 5, 0);
+    recv(sock, buffer, sizeof(buffer), 0);
+    closesocket(sock);
+    WSACleanup();
+}
+#endif
+
+int test_socks5()
+{
+    #define SOCKS5_VERSION 0x05
+    #define SOCKS5_CMD_CONNECT 0x01
+    #define SOCKS5_ATYP_DOMAIN 0x03
+    int sock;
+    struct sockaddr_in server_addr;
+    char request[1024];
+    const char *onion_address = "juhanurmihxlp77nkq76byazcldy2hlmovfu2epvl5ankdibsot4csyd.onion";
+    int port = 80; // Change to 443 for HTTPS
+
+    // Create socket
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        perror("Socket creation failed");
+        return 1;
+    }
+
+    // Set up the SOCKS5 proxy address (Tor)
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(9050); // Tor's SOCKS5 port
+    inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr);
+
+    // Connect to the SOCKS5 proxy
+    if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        perror("Connection to SOCKS5 proxy failed");
+        close(sock);
+        return 1;
+    }
+
+    // Send SOCKS5 connection request
+    int address_length = strlen(onion_address);
+    request[0] = SOCKS5_VERSION; // Version
+    request[1] = SOCKS5_CMD_CONNECT; // Command
+    request[2] = 0; // Reserved
+    request[3] = SOCKS5_ATYP_DOMAIN; // Address type (domain)
+    request[4] = address_length; // Length of domain name
+    memcpy(&request[5], onion_address, address_length); // Domain name
+    // Set the destination port (2 bytes, network byte order)
+    request[5 + address_length] = (port >> 8) & 0xFF; // High byte
+    request[6 + address_length] = port & 0xFF;        // Low byte
+
+    // Send the SOCKS5 connection request
+    int request_length = 7 + address_length; // 1 (version) + 1 (command) + 1 (reserved) + 1 (address type) + 1 (length) + length of domain + 2 (port)
+    if (send(sock, request, request_length, 0) < 0) {
+        perror("Failed to send SOCKS5 request");
+        close(sock);
+        return 1;
+    }
+
+    // Receive the SOCKS5 response
+    char response[10]; // Buffer for the response
+    if (recv(sock, response, sizeof(response), 0) < 0) {
+        perror("Failed to receive SOCKS5 response");
+        close(sock);
+        return 1;
+    }
+
+    // Check the response
+    if (response[1] != 0x00) { // Check if the command succeeded
+        fprintf(stderr, "SOCKS5 connection failed: %d\n", response[1]);
+        close(sock);
+        return 1;
+    }
+
+    // Successfully connected to the .onion service
+    printf("Successfully connected to %s:%d through SOCKS5 proxy.\n", onion_address, port);
+
+    // Now you can send HTTP requests or other data through the established connection
+    // Example: Sending an HTTP GET request
+    char http_request[1024];
+    snprintf(http_request, sizeof(http_request),
+             "GET / HTTP/1.1\r\n"
+             "Host: %s\r\n"
+             "Connection: close\r\n"
+             "\r\n", onion_address);
+
+    DEBUG //
+    // Send the HTTP request
+    send(sock, http_request, strlen(http_request), 0);
+
+    DEBUG //
+    // Receive the HTTP response
+    char buffer[4096];
+    int bytes_received;
+    while ((bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0)) > 0) {
+        buffer[bytes_received] = '\0'; // Null-terminate the buffer
+        printf("%s", buffer); // Print the response
+    }
+    DEBUG //
+
+    // Close the socket
+    close(sock);
+    return 0;
 }
 
 int main(int ac, char **av)
 {
+    char    *xml = "<web>\
+	<request method='GET' url='http://hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion/'>\
+		<header User-Agent=\"custom\"/>\
+		<header Host=\"hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion\"/>\
+	</request>\
+	<response version='HTTP/1.1' code='200'>\
+		<header Date=\"Fri, 21 Feb 2025 11:32:36 GMT\"/>\
+		<header Server=\"Apache/2.4.41 (Ubuntu)\"/>\
+		<header X-Frame-Options=\"SAMEORIGIN\"/>\
+		<header X-Content-Type-Options=\"nosniff\"/>\
+		<header Expires=\"Thu, 19 Nov 1981 08:52:00 GMT\"/>\
+		<header Cache-Control=\"private, no-cache, max-age=0\"/>\
+		<header Set-Cookie=\"xf_csrf=VES7fIfmRBLMS_Yz; path=/\"/>\
+		<header Last-Modified=\"Fri, 21 Feb 2025 11:32:36 GMT\"/>\
+		<header Vary=\"Accept-Encoding\"/>\
+		<header Transfer-Encoding=\"chunked\"/>\
+		<header Content-Type=\"text/html; charset=utf-8\"/>\
+		<content>\
+			2000\
+			<!DOCTYPE html>\
+			<html id=\"XF\" lang=\"en-US\" dir=\"LTR\"\
+				data-app=\"public\"\
+				data-template=\"forum_list\"\
+				data-container-key=\"\"\
+				data-content-key=\"\"\
+				data-logged-in=\"false\"\
+				data-cookie-prefix=\"xf_\"\
+				class=\"has-no-js template-forum_list\"\
+				data-run-jobs=\"\">\
+			</html>\
+		</content>\
+	</response>\
+	<web>\
+		<request method='GET' url='http://hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion/pgp.txt'>\
+			<header User-Agent=\"custom\"/>\
+			<header Host=\"hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion\"/>\
+		</request>\
+		<response version='HTTP/1.1' code='200'>\
+			<header Date=\"Fri, 21 Feb 2025 11:33:51 GMT\"/>\
+			<header Server=\"Apache/2.4.41 (Ubuntu)\"/>\
+			<header Last-Modified=\"Sun, 06 Oct 2024 14:00:20 GMT\"/>\
+			<header ETag=\"cbc-623cf5325380e\"/>\
+			<header Accept-Ranges=\"bytes\"/>\
+			<header Content-Length=\"3260\"/>\
+			<header Vary=\"Accept-Encoding\"/>\
+			<header Content-Type=\"text/plain\"/>\
+			<content>-----BEGIN PGP PUBLIC KEY BLOCK-----</content>\
+		</response>\
+	</web>\
+</web>";
+
+    char        *script = "<web>\
+	<request method='GET' url='http://hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion/'>\
+		<header User-Agent=\"custom\"/>\
+		<header Host=\"hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion\"/>\
+	</request>\
+	<response version='HTTP/1.1' code='200'>\
+		<header Date=\"Fri, 21 Feb 2025 11:32:36 GMT\"/>\
+		<header Server=\"Apache/2.4.41 (Ubuntu)\"/>\
+		<header X-Frame-Options=\"SAMEORIGIN\"/>\
+		<header X-Content-Type-Options=\"nosniff\"/>\
+		<header Expires=\"Thu, 19 Nov 1981 08:52:00 GMT\"/>\
+		<header Cache-Control=\"private, no-cache, max-age=0\"/>\
+		<header Set-Cookie=\"xf_csrf=VES7fIfmRBLMS_Yz; path=/\"/>\
+		<header Last-Modified=\"Fri, 21 Feb 2025 11:32:36 GMT\"/>\
+		<header Vary=\"Accept-Encoding\"/>\
+		<header Transfer-Encoding=\"chunked\"/>\
+		<header Content-Type=\"text/html; charset=utf-8\"/>\
+		<content>\
+		<html>\
+	<script src=\"/js/vendor/jquery/jquery-3.5.1.min.js?_v=c58f955f\"></script>\
+	<script src=\"/js/vendor/vendor-compiled.js?_v=c58f955f\"></script>\
+	<script src=\"/js/xf/core-compiled.js?_v=c58f955f\"></script>\
+	<script>\
+	XF.samViewCountMethod = \"view\";\
+	XF.samServerTime = 1740314851;\
+	XF.samItem = \".samItem\";\
+	XF.samCodeUnit = \".samCodeUnit\";\
+	XF.samBannerUnit = \".samBannerUnit\";\
+</script></html></content>\
+	</response>\
+	</web>";
+
+    //t_web_node *node;
+    //node = web_import_xml(script);
+    //web_shell(node);
+    if (1)
+    {
+        t_web_node  *node;
+
+        /// TODO CRASH
+        /// http://hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion/posts/103897/
+
+        //node = web_new_node("http://www.bbcnewsd73hkzno2ini43t4gblxvycyac5aw4gnv7t2rccijh7745uqd.onion/", NULL, 1);
+        if (ac != 2)
+            node = web_new_node("http://hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion/", NULL, 1);
+        else
+            node = web_new_node(av[1], NULL, 1);
+        web_shell(node);
+    }
     //test_http(av[1]);
     //test_web();
-    test_import_export(av[1]);
+    //test_parser();
+    ///test_import_export(av[1]);
+    //test_connection();
+    ///test_socks5();
+    //test_windows_connection();
+    //test_web();
     return (0);
 }
