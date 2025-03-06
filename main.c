@@ -10,7 +10,7 @@
 ///#define _WIN32
 // Ne pas oublier -lws2_32 sur Windows
 
-///#define SSL_ENABLED
+#define SSL_ENABLED
 
 #ifdef _WIN32
 // Windows-specific includes
@@ -21,6 +21,10 @@
 #include <netdb.h>
 #include <sys/socket.h>
 #endif
+#include <pthread.h>
+#include <netinet/ip.h>
+#include <netinet/tcp.h>
+#include <netinet/in.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <unistd.h> // read(), write(), close()
@@ -28,6 +32,10 @@
 
 #define PROTOCOL_HTTP 0
 #define PROTOCOL_SOCKS5 1
+#define PORT_MIN 1024
+#define PORT_MAX 65535
+#define TIMEOUT 5 // Timeout en secondes
+#define THREAD_COUNT 1 /// More than 1 bug
 
 #define STRING_SIZE 128
 
@@ -310,6 +318,43 @@ void        html_display_node_max(t_html_node *node, uint tab, uint maxdepth)
         html_display_node_max(buffer_get_index(&node->child, i), tab + 1, maxdepth - 1);
 }
 
+void debug_hexdump(char *data, uint length)
+{
+    uint        k;
+    uint        j;
+    uint        i;
+    uint        counter;
+
+    if (!data || length == 0)
+        return ;
+    counter = 0;
+    while (counter < length)
+    {
+        k = 0;
+        while (k < 4)
+        {
+            //printf("%x", ((char *)&i)[k]);
+            if (((char *)&counter)[k] >= 16)
+                printf("%x", ((unsigned char *)&counter)[k]);
+            else
+                printf("0%x", ((unsigned char *)&counter)[k]);
+            k++;
+        }
+        printf(" ");
+        j = 0;
+        while (j < 16 && j + counter < length)
+        {
+            k = -1;
+            while (++k < 2 && counter + j + k < length)
+                printf("%02x", (unsigned char)data[counter + j + k]);
+            j += k;
+            printf(" ");
+        }
+        counter += j;
+        printf("\n");
+    }
+}
+
 void debug_string(char *str, uint count)
 {
     printf("DEBUG STRING [");
@@ -390,16 +435,24 @@ void                *html_free_node_noroot(t_html_node *node)
 
     if (!node)
         return (NULL);
+    DEBUG //
     i = -1;
     while (++i < node->param.size)
         buffer_free_param((t_buf_param *)buffer_get_index(&node->param, i));
+    DEBUG //
     i = -1;
     while (++i < node->child.size)
         html_free_node_noroot((t_html_node *)buffer_get_index(&node->child, i));
+    DEBUG //
     if (node->text)
         FREE(node->text);
+    DEBUG //
     if (node->parent)
+    {
+        html_display_node_max(node, 1, 2); //
         FREE(node);
+    }
+    DEBUG //
     return (NULL);
 }
 
@@ -1423,6 +1476,7 @@ struct s_html_node          html_parse(char *html)
     count = 0;
     while ((node = html_new_node(html, NULL, &html)))
     {
+        node->parent = &root;
         if (buffer_push(&root.child, node))
         {
             html_free_node(node);
@@ -1625,20 +1679,32 @@ void cleanup_openssl()
 
 SSL_CTX *create_context()
 {
+    const SSL_METHOD *method;
+    SSL_CTX *ctx;
+
+    method = SSLv23_client_method();
+    ctx = SSL_CTX_new(method);
+    if (!ctx) {
+        ERR_print_errors_fp(stderr);
+        return (NULL);
+    }
+    return (ctx);
+    /**
     SSL_CTX *ctx;
 
     ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx) {
-        ERR_print_errors_fp(stderr);
-        abort();
+        //ERR_print_errors_fp(stderr);
+        return (NULL);
     }
-
-    return ctx;
+    return (ctx);
+    */
 }
 
 void configure_context(SSL_CTX *ctx) {
     // Set the default verification paths
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+    ///SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
     SSL_CTX_set_verify_depth(ctx, 1);
 }
 #endif
@@ -1663,9 +1729,6 @@ struct s_net_connection     net_new_onion_connection(char *host, int port, int s
     if (ssl)
     {
         con.ssl_enabled = 1;
-        init_openssl();
-        con.ctx = create_context();
-        configure_context(con.ctx);
     }
     #endif
 
@@ -1691,9 +1754,6 @@ struct s_net_connection     net_new_onion_connection(char *host, int port, int s
     if (ssl)
     {
         con.ssl_enabled = 1;
-        init_openssl();
-        con.ctx = create_context();
-        configure_context(con.ctx);
     }
     #endif
     // assign IP, PORT
@@ -1746,9 +1806,6 @@ struct s_net_connection     net_new_connection(char *ip, int port, int ssl)
     if (ssl)
     {
         con.ssl_enabled = 1;
-        init_openssl();
-        con.ctx = create_context();
-        configure_context(con.ctx);
     }
     #endif
     // assign IP, PORT
@@ -1768,6 +1825,19 @@ struct s_net_connection     net_new_connection(char *ip, int port, int ssl)
             close(con.sock);
             return (con);
         }
+    }
+    // Définir le timeout pour la réception
+    struct timeval tv;
+    tv.tv_sec = TIMEOUT;
+    tv.tv_usec = 0;
+    setsockopt(con.sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+    // Définir le TTL
+    int ttl = 16;
+    if (setsockopt(con.sock, IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl)) < 0) {
+        perror("setsockopt failed");
+        close(con.sock);
+        con.sock = -1;
+        return (con);
     }
     return (con);
 }
@@ -1985,12 +2055,13 @@ int             net_connect(t_net_connection *con)
     #ifdef SSL_ENABLED
     if (con->ssl_enabled)
     {
+        init_openssl();
+        con->ctx = create_context();
+        configure_context(con->ctx);
         // Create SSL connection
-        con->ssl = SSL_new(con->ctx);
-        SSL_set_fd(con->ssl, con->sock);
-        // Establish SSL connection
-        if (SSL_connect(con->ssl) <= 0)
+        if (!(con->ssl = SSL_new(con->ctx)))
             return (1);
+        SSL_set_fd(con->ssl, con->sock);
     }
     #endif
     if (url_is_ipv6(con->ip))
@@ -2041,6 +2112,17 @@ int             net_connect(t_net_connection *con)
         }
         FREE(onion);
     }
+    #ifdef SSL_ENABLED
+    if (con->ssl_enabled)
+    {
+        // Establish SSL connection
+        if (SSL_connect(con->ssl) <= 0)
+        {
+            ERR_print_errors_fp(stderr); //
+            return (1);
+        }
+    }
+    #endif // SSL_ENABLED
     con->connected = 1;
     return (0);
 }
@@ -2499,7 +2581,7 @@ char                           *string_stringify(char *str, char special)
     return (ret);
 }
 
-struct s_http_response         http_new_response(char *http)
+struct s_http_response         http_new_response(char *http, uint *length)
 {
     t_buf_param                 *param;
     struct s_http_response      response;
@@ -2511,6 +2593,16 @@ struct s_http_response         http_new_response(char *http)
     memset(&response, 0, sizeof(struct s_http_response));
     if (!http)
         return (response);
+    if (length)
+    {
+        ptr = http - 1;
+        while (*(++ptr))
+            if (*ptr == '\n' && *(ptr + 1) == '\n')
+            {
+                *length = ptr - http;
+                break;
+            }
+    }
     if (!(res = string_remove_char(http, '\r')))
         return (response);
     ptr = res;
@@ -2644,23 +2736,39 @@ char            *net_recv(t_net_connection *con, uint *length)
     #else
     ///while ((rd = read(con->sock, buff, NET_BUF_SIZE)) > 0)
     while (
+           (con->ssl_enabled == 0
+           && (
            (content_length == -1 && (rd = read(con->sock, buff, NET_BUF_SIZE)) > 0) ||
            (readed.size < content_length && (rd = read(con->sock, buff, NET_BUF_SIZE)) > 0)
+               )) ||
+           (con->ssl_enabled == 1
+            && (
+           (content_length == -1 && (rd = SSL_read(con->ssl, buff, NET_BUF_SIZE)) > 0) ||
+           (readed.size < content_length && (rd = SSL_read(con->ssl, buff, NET_BUF_SIZE)) > 0)
+                )
+            )
            )
     #endif
     {
         if (readed.size == 0)
         {
             // Superman
-            response = http_new_response(buff);
+            uint http_length;
+            response = http_new_response(buff, &http_length);
             if (response.code != 0)
+            {
+                http_display_response(&response); //
                 if ((content_length_string = buffer_param_get_var_buf(&response.header, "Content-Length")))
-                    content_length = atoi(content_length_string) + rd;
+                    content_length = atoi(content_length_string) + http_length - 64; // BUG -64 ???
+            }
             //printf("content-length = %d\n", content_length); //
             http_free_response(&response);
         }
-        printf("> %u\n", rd);
+        printf("> %u", rd);
         readed.size = rd;
+        if (content_length != -1)
+            printf(" (%u/%u)", readed.size, content_length);
+        printf("\n");
         if (length)
             *length += rd;
         if (buffer_concat(&string, &readed))
@@ -2668,17 +2776,16 @@ char            *net_recv(t_net_connection *con, uint *length)
             buffer_free(&string);
             return (NULL);
         }
-        /// Batman
-        //if (rd != NET_BUF_SIZE)
-        //    break;
     }
     printf("\n");
+    /** // TIMEOUT
     if (rd == -1)
     {
         printf("Transmission error\n");
         buffer_free(&string);
         return (NULL);
     }
+    */
     printf("Received %u bytes\n", string.size);
     return ((char *)string.buf);
 }
@@ -3379,7 +3486,7 @@ struct s_http_response      web_get_page(char *url, t_http_request *out)
             http_free_request(&request);
         return (response);
     }
-    response = http_new_response(recv);
+    response = http_new_response(recv, NULL);
     FREE(recv);
     if (response.code == 301 || response.code == 302)
     {
@@ -3416,6 +3523,27 @@ struct s_http_response      web_get_page(char *url, t_http_request *out)
     return (response);
 }
 
+typedef struct  s_web_transmission
+{
+    uint        origin;
+    uint        length;
+    char        *data;
+}               t_web_transmission;
+
+typedef struct  s_web_port
+{
+    uint            number; // unsigned Short
+    char            service[STRING_SIZE];
+    struct s_buf    transmission;
+}               t_web_port;
+
+typedef struct  s_web_ip
+{
+    int             version;
+    char            ip[STRING_SIZE];
+    struct s_buf    port;
+}               t_web_ip;
+
 typedef struct s_web_node
 {
     struct s_http_request   request;
@@ -3423,24 +3551,122 @@ typedef struct s_web_node
     struct s_web_node       *parent;
     struct s_buf            child;
     struct s_html_node      html;
+    struct s_web_host       *host;
+    pthread_mutex_t         mutex;
 }               t_web_node;
+
+typedef struct  s_web_host
+{
+    t_web_node      *parent;
+    char            *name;
+    struct s_buf    ip;
+}               t_web_host;
+
+void                *web_free_transmission(t_web_transmission *transmission)
+{
+    if (!transmission)
+        return (NULL);
+    if (transmission->data)
+        FREE(transmission->data);
+    return (NULL);
+}
+
+void                *web_free_port(t_web_port *port)
+{
+    t_web_transmission      *transmission;
+    uint                    i;
+
+    if (!port)
+        return (NULL);
+    i = -1;
+    while (++i < port->transmission.size)
+    {
+        transmission = *((t_web_transmission **)buffer_get_index(&port->transmission, i));
+        if (!transmission)
+            continue;
+        web_free_transmission(transmission);
+        FREE(transmission);
+    }
+    buffer_free(&port->transmission);
+    return (NULL);
+}
+
+void                *web_free_ip(t_web_ip *ip)
+{
+    t_web_port      *port;
+    uint            i;
+
+    if (!ip)
+        return (NULL);
+    i = -1;
+    while (++i < ip->port.size)
+    {
+        port = *((t_web_port **)buffer_get_index(&ip->port, i));
+        if (!port)
+            continue;
+        web_free_port(port);
+        FREE(port);
+    }
+    buffer_free(&ip->port);
+    return (NULL);
+}
+
+void                *web_free_host(t_web_host *host)
+{
+    uint            i;
+    t_web_ip        *ip;
+
+    if (!host)
+        return (NULL);
+    if (host->name)
+        FREE(host->name);
+    i = -1;
+    while (++i < host->ip.size)
+    {
+        ip = *((t_web_ip **)buffer_get_index(&host->ip, i));
+        if (!ip)
+            continue;
+        web_free_ip(ip);
+        FREE(ip);
+    }
+    buffer_free(&host->ip);
+    return (NULL);
+}
 
 void            web_free_node(t_web_node *node)
 {
     t_web_node  *child;
     uint        i;
 
+    DEBUG //
     http_free_request(&node->request);
+    DEBUG //
     http_free_response(&node->response);
+    DEBUG //
     i = -1;
     while (++i < node->child.size)
     {
+        DEBUG //
         child = *((t_web_node **)buffer_get_index(&node->child, i));
+        DEBUG //
+        if (!child)
+            continue;
+        DEBUG //
         web_free_node(child);
+        DEBUG //
         FREE(child);
     }
+    DEBUG //
     buffer_free(&node->child);
+    DEBUG //
     html_free_node_noroot(&node->html);
+    DEBUG //
+    if (node->host)
+    {
+        web_free_host(node->host);
+        FREE(node->host);
+    }
+    DEBUG //
 }
 
 char            *http_request_export_xml(t_http_request *request)
@@ -3525,6 +3751,224 @@ char            *http_response_export_xml(t_http_response *response)
     return (xml);
 }
 
+char            *string_hexdump(char *data, uint length)
+{
+    char        *ptr;
+    uint        i;
+    char        *hexstring;
+
+    if (!(ptr = data))
+        return (NULL);
+    hexstring = NULL;
+    i = -1;
+    while (++i < length)
+    {
+        hexstring = string_stradd(hexstring, "\\x");
+        switch ((*ptr >> 8) & 0x0F)
+        {
+            case 0:
+                hexstring = string_stradd(hexstring, "0");
+                break;
+            case 1:
+                hexstring = string_stradd(hexstring, "1");
+                break;
+            case 2:
+                hexstring = string_stradd(hexstring, "2");
+                break;
+            case 3:
+                hexstring = string_stradd(hexstring, "3");
+                break;
+            case 4:
+                hexstring = string_stradd(hexstring, "4");
+                break;
+            case 5:
+                hexstring = string_stradd(hexstring, "5");
+                break;
+            case 6:
+                hexstring = string_stradd(hexstring, "6");
+                break;
+            case 7:
+                hexstring = string_stradd(hexstring, "7");
+                break;
+            case 8:
+                hexstring = string_stradd(hexstring, "8");
+                break;
+            case 9:
+                hexstring = string_stradd(hexstring, "9");
+                break;
+            case 10:
+                hexstring = string_stradd(hexstring, "a");
+                break;
+            case 11:
+                hexstring = string_stradd(hexstring, "b");
+                break;
+            case 12:
+                hexstring = string_stradd(hexstring, "c");
+                break;
+            case 13:
+                hexstring = string_stradd(hexstring, "d");
+                break;
+            case 14:
+                hexstring = string_stradd(hexstring, "e");
+                break;
+            case 15:
+                hexstring = string_stradd(hexstring, "f");
+                break;
+        }
+        switch (*ptr & 0x0F)
+        {
+            case 0:
+                hexstring = string_stradd(hexstring, "0");
+                break;
+            case 1:
+                hexstring = string_stradd(hexstring, "1");
+                break;
+            case 2:
+                hexstring = string_stradd(hexstring, "2");
+                break;
+            case 3:
+                hexstring = string_stradd(hexstring, "3");
+                break;
+            case 4:
+                hexstring = string_stradd(hexstring, "4");
+                break;
+            case 5:
+                hexstring = string_stradd(hexstring, "5");
+                break;
+            case 6:
+                hexstring = string_stradd(hexstring, "6");
+                break;
+            case 7:
+                hexstring = string_stradd(hexstring, "7");
+                break;
+            case 8:
+                hexstring = string_stradd(hexstring, "8");
+                break;
+            case 9:
+                hexstring = string_stradd(hexstring, "9");
+                break;
+            case 10:
+                hexstring = string_stradd(hexstring, "a");
+                break;
+            case 11:
+                hexstring = string_stradd(hexstring, "b");
+                break;
+            case 12:
+                hexstring = string_stradd(hexstring, "c");
+                break;
+            case 13:
+                hexstring = string_stradd(hexstring, "d");
+                break;
+            case 14:
+                hexstring = string_stradd(hexstring, "e");
+                break;
+            case 15:
+                hexstring = string_stradd(hexstring, "f");
+                break;
+        }
+        ptr++;
+    }
+    return (hexstring);
+}
+
+char            *web_transmission_export_xml(t_web_transmission *transmission)
+{
+    char                *hexstring;
+    char                *xml;
+    char                number[STRING_SIZE];
+
+    if (!transmission)
+        return (NULL);
+    xml = string_stradd(NULL, "<transmission origin='");
+    xml = string_stradd(xml, itoa(transmission->origin, number, 10));
+    xml = string_stradd(xml, "' length='");
+    xml = string_stradd(xml, itoa(transmission->length, number, 10));
+    xml = string_stradd(xml, "' type='");
+    if (strlen(transmission->data) != transmission->length)
+    {
+        xml = string_stradd(xml, "binary'>");
+        hexstring = string_hexdump(transmission->data, transmission->length);
+        xml = string_stradd(xml, hexstring);
+        FREE(hexstring);
+    }
+    else
+    {
+        xml = string_stradd(xml, "text'>");
+        xml = string_stradd(xml, transmission->data);
+    }
+    xml = string_stradd(xml, "</transmission>");
+    return (xml);
+}
+
+char            *web_port_export_xml(t_web_port *port)
+{
+    t_web_transmission  *transmission;
+    uint                i;
+    char                *xml;
+    char                portnum[STRING_SIZE];
+
+    if (!port)
+        return (NULL);
+    xml = string_stradd(NULL, "<port number='");
+    xml = string_stradd(xml, itoa(port->number, portnum, 10));
+    xml = string_stradd(xml, "' service='");
+    xml = string_stradd(xml, port->service);
+    xml = string_stradd(xml, "'>");
+    i = -1;
+    while (++i < port->transmission.size)
+    {
+        transmission = *((t_web_transmission **)buffer_get_index(&port->transmission, i));
+        xml = string_stradd(xml, web_transmission_export_xml(transmission));
+    }
+    xml = string_stradd(xml, "</port>");
+    return (xml);
+}
+
+char            *web_ip_export_xml(t_web_ip *ip)
+{
+    t_web_port  *port;
+    uint        i;
+    char        *xml;
+    char        versionnum[STRING_SIZE];
+
+    if (!ip)
+        return (NULL);
+    xml = string_stradd(NULL, "<ip version='");
+    xml = string_stradd(xml, itoa(ip->version, versionnum, 10));
+    xml = string_stradd(xml, "' source='");
+    xml = string_stradd(xml, ip->ip);
+    xml = string_stradd(xml, "'>");
+    i = -1;
+    while (++i < ip->port.size)
+    {
+        port = *((t_web_port **)buffer_get_index(&ip->port, i));
+        xml = string_stradd(xml, web_port_export_xml(port));
+    }
+    xml = string_stradd(xml, "</ip>");
+    return (xml);
+}
+
+char            *web_host_export_xml(t_web_host *host)
+{
+    t_web_ip    *ip;
+    char        *xml;
+    uint        i;
+
+    if (!host)
+        return (NULL);
+    xml = string_stradd(NULL, "<host name='");
+    xml = string_stradd(xml, host->name);
+    xml = string_stradd(xml, "'>");
+    i = -1;
+    while (++i < host->ip.size)
+    {
+        ip = *((t_web_ip **)buffer_get_index(&host->ip, i));
+        xml = string_stradd(xml, web_ip_export_xml(ip));
+    }
+    xml = string_stradd(xml, "</host>");
+    return (xml);
+}
+
 void            web_display_node(t_web_node *node)
 {
     t_web_node  *child;
@@ -3562,6 +4006,7 @@ char            *web_export_xml(t_web_node *node)
     //http_display_request(&node->request); //
     xml = string_stradd(xml, http_request_export_xml(&node->request));
     xml = string_stradd(xml, http_response_export_xml(&node->response));
+    xml = string_stradd(xml, web_host_export_xml(node->host));
     i = -1;
     while (++i < node->child.size)
     {
@@ -3673,6 +4118,198 @@ struct s_http_response   http_response_import_xml(t_html_node *node)
     return (response);
 }
 
+t_web_transmission          *web_transmission_import_xml(t_html_node *node)
+{
+    t_web_transmission      *transmission;
+    struct s_buf            list;
+    char                    *ptr;
+    uint                    i;
+
+    if (!node || !(transmission = ALLOC(sizeof(struct s_web_transmission))))
+        return (NULL);
+    memset(transmission, 0, sizeof(struct s_web_transmission));
+    if (strncasecmp(node->tag, "transmission", strlen("transmission")) != 0)
+    {
+        list = html_find_tag_max(node, "transmission", 1);
+        if (list.size == 0 || !(node = *((t_html_node **)buffer_get_index(&list, 0))))
+        {
+            buffer_free(&list);
+            FREE(transmission);
+            return (NULL);
+        }
+        buffer_free(&list);
+    }
+    if (!(ptr = buffer_param_get_var_buf_alt(&node->param, "origin")))
+    {
+        FREE(transmission);
+        return (NULL);
+    }
+    transmission->origin = atoi(ptr);
+    if (!(ptr = buffer_param_get_var_buf_alt(&node->param, "length")))
+    {
+        FREE(transmission);
+        return (NULL);
+    }
+    transmission->length = atoi(ptr);
+    if (!(ptr = buffer_param_get_var_buf_alt(&node->param, "type")))
+    {
+        FREE(transmission);
+        return (NULL);
+    }
+    if (strncasecmp(ptr, "text", strlen("text")) == 0)
+    {
+        transmission->data = html_get_texts(node);
+    }
+    else if (strncasecmp(ptr, "binary", strlen("binary")) == 0)
+    {
+        if ((ptr = html_get_texts(node)))
+        {
+            ///transmission->data = string_hexdump_read(ptr);
+            transmission->data = string_strdup(ptr);
+            FREE(ptr);
+        }
+    }
+    return (transmission);
+}
+
+t_web_port            *web_port_import_xml(t_html_node *node)
+{
+    t_web_transmission      *transmission;
+    t_web_port              *port;
+    struct s_buf            list;
+    char                    *ptr;
+    uint                    i;
+
+    if (!node || !(port = ALLOC(sizeof(struct s_web_port))))
+        return (NULL);
+    memset(port, 0, sizeof(struct s_web_port));
+    port->transmission = buffer_new(sizeof(t_web_transmission), 0);
+    if (strncasecmp(node->tag, "port", strlen("port")) != 0)
+    {
+        list = html_find_tag_max(node, "port", 1);
+        if (list.size == 0 || !(node = *((t_html_node **)buffer_get_index(&list, 0))))
+        {
+            buffer_free(&list);
+            FREE(port);
+            return (NULL);
+        }
+        buffer_free(&list);
+    }
+    if (!(ptr = buffer_param_get_var_buf_alt(&node->param, "number")))
+    {
+        FREE(port);
+        return (NULL);
+    }
+    port->number = atoi(ptr);
+    if (!(ptr = buffer_param_get_var_buf_alt(&node->param, "service")))
+    {
+        FREE(port);
+        return (NULL);
+    }
+    strncpy(port->service, ptr, STRING_SIZE);
+    list = html_find_tag_max(node, "transmission", 1);
+    i = -1;
+    while (++i < list.size)
+    {
+        node = *((t_html_node **)buffer_get_index(&list, i));
+        transmission = web_transmission_import_xml(node);
+        if (port)
+            buffer_push(&port->transmission, &transmission);
+    }
+    buffer_free(&list);
+    return (port);
+}
+
+t_web_ip            *web_ip_import_xml(t_html_node *node)
+{
+    t_web_port              *port;
+    t_web_ip                *ip;
+    struct s_buf            list;
+    char                    *ptr;
+    uint                    i;
+
+    if (!node || !(ip = ALLOC(sizeof(struct s_web_ip))))
+        return (NULL);
+    memset(ip, 0, sizeof(struct s_web_ip));
+    ip->port = buffer_new(sizeof(t_web_port), 0);
+    if (strncasecmp(node->tag, "ip", strlen("ip")) != 0)
+    {
+        list = html_find_tag_max(node, "ip", 1);
+        if (list.size == 0 || !(node = *((t_html_node **)buffer_get_index(&list, 0))))
+        {
+            buffer_free(&list);
+            FREE(ip);
+            return (NULL);
+        }
+        buffer_free(&list);
+    }
+    if (!(ptr = buffer_param_get_var_buf_alt(&node->param, "version")))
+    {
+        FREE(ip);
+        return (NULL);
+    }
+    ip->version = atoi(ptr);
+    if (!(ptr = buffer_param_get_var_buf_alt(&node->param, "source")))
+    {
+        FREE(ip);
+        return (NULL);
+    }
+    strncpy(ip->ip, ptr, STRING_SIZE);
+    list = html_find_tag_max(node, "port", 1);
+    i = -1;
+    while (++i < list.size)
+    {
+        node = *((t_html_node **)buffer_get_index(&list, i));
+        port = web_port_import_xml(node);
+        if (port)
+            buffer_push(&ip->port, &port);
+    }
+    buffer_free(&list);
+    return (ip);
+}
+
+t_web_host          *web_host_import_xml(t_html_node *node)
+{
+    t_web_host              *host;
+    t_web_ip                *ip;
+    struct s_buf            list;
+    char                    *ptr;
+    uint                    i;
+
+    if (!node || !(host = ALLOC(sizeof(struct s_web_host))))
+        return (NULL);
+    memset(host, 0, sizeof(struct s_web_host));
+    host->ip = buffer_new(sizeof(t_web_ip), 0);
+    if (strncasecmp(node->tag, "host", strlen("host")) != 0)
+    {
+        list = html_find_tag_max(node, "host", 1);
+        if (list.size == 0 || !(node = *((t_html_node **)buffer_get_index(&list, 0))))
+        {
+            buffer_free(&list);
+            FREE(host);
+            return (NULL);
+        }
+        buffer_free(&list);
+    }
+    if (!(ptr = buffer_param_get_var_buf_alt(&node->param, "name")))
+    {
+        FREE(host);
+        return (NULL);
+    }
+    host->name = string_stradd(NULL, ptr);
+    list = html_find_tag_max(node, "ip", 1);
+    i = -1;
+    while (++i < list.size)
+    {
+        node = *((t_html_node **)buffer_get_index(&list, i));
+        ip = web_ip_import_xml(node);
+        if (ip)
+            buffer_push(&host->ip, &ip);
+    }
+    buffer_free(&list);
+    return (host);
+}
+
 struct s_http_request   http_request_import_xml(t_html_node *node)
 {
     struct s_http_request   request;
@@ -3744,6 +4381,11 @@ t_web_node              *web_import_xml_node(t_html_node *node, t_web_node *pare
     web->parent = parent;
     web->request = http_request_import_xml(node);
     web->response = http_response_import_xml(node);
+    web->host = web_host_import_xml(node);
+    if (web->host)
+    {
+        web->host->parent = web;
+    }
     web->html = html_parse(web->response.buf);
     i = -1;
     while (++i < node->child.size)
@@ -3917,12 +4559,19 @@ t_web_node          *web_new_node(char *url, t_web_node *parent, uint maxdepth)
     return (node);
 }
 
-void            web_shell_display_prompt(t_web_node *node)
+void            web_shell_display_prompt(t_web_node *node, int maxdepth)
 {
-    if (!node)
+    if (!node || maxdepth == 0)
         return ;
-    web_shell_display_prompt(node->parent);
-    printf("%s -\n", node->request.url);
+    if (maxdepth < 0)
+        web_shell_display_prompt(node->parent, -1);
+    else
+    {
+        if (maxdepth - 1 <= 0 && node->parent)
+            printf("...\n");
+        web_shell_display_prompt(node->parent, maxdepth - 1);
+    }
+    printf("%s\n", node->request.url);
 }
 
 void            web_shell_display_help(void)
@@ -3937,6 +4586,7 @@ void            web_shell_display_help(void)
     printf("child : Display childs\n");
     printf("goto : Goto child\n");
     printf("export : Export to XML\n");
+    printf("import : Import XML web node\n");
     printf("save : Export everything to XML\n");
     printf("content : View node content\n");
     printf("texts : Display all text\n");
@@ -3952,6 +4602,7 @@ void            web_shell_display_help(void)
     printf("expandallsamesite : Download recursively all sublinks of not the same host of node\n");
     printf("expandallnotsamesite : Download recursively all sublinks of not the same host of node\n");
     printf("mail : Display all mails of node tree\n");
+    printf("host : Host shell\n");
     printf("----------------\n");
 }
 
@@ -4218,7 +4869,182 @@ int             web_shell_command_getword(char *input, t_web_node *node)
     buffer_free_param_list(&paramlist);
 }
 
-int             web_shell_command_expand(char *input, t_web_node *node)
+typedef struct {
+    t_web_node *node;
+    t_html_node *tag;
+} thread_data_t;
+
+typedef struct {
+    thread_data_t *tasks;
+    int task_count;
+    int task_index;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+} thread_pool_t;
+
+void *process_tag(void *arg) {
+    thread_pool_t *pool = (thread_pool_t *)arg;
+    while (1) {
+        pthread_mutex_lock(&pool->mutex);
+
+        // Attendre qu'il y ait des tâches à traiter
+        while (pool->task_index >= pool->task_count) {
+            pthread_cond_wait(&pool->cond, &pool->mutex);
+        }
+
+        // Récupérer la tâche
+        thread_data_t data = pool->tasks[pool->task_index];
+        pool->task_index++;
+        pthread_mutex_unlock(&pool->mutex);
+
+        // Vérification des pointeurs
+        if (!data.node || !data.tag) {
+            fprintf(stderr, "Invalid node or tag\n");
+            continue; // Passer à la prochaine itération
+        }
+
+        t_web_node *node = data.node;
+        t_html_node *tag = data.tag;
+        char *full_url;
+        t_buf_param *param;
+        uint j;
+
+        for (j = 0; j < tag->param.size; j++) {
+            param = buffer_get_index(&tag->param, j);
+            if (!param) {
+                fprintf(stderr, "Invalid parameter at index %u\n", j);
+                continue; // Passer à la prochaine itération
+            }
+
+            if (strncasecmp(param->name, "href", STRING_SIZE) == 0) {
+                if (param->data.buf && *((char *)param->data.buf) == '#')
+                    continue;
+                if (strncasecmp(param->data.buf, "mailto:", strlen("mailto:")) == 0)
+                    continue;
+                full_url = url_get_full(node->request.url, param->data.buf);
+                if (!full_url) {
+                    fprintf(stderr, "Failed to get full URL\n");
+                    continue; // Passer à la prochaine itération
+                }
+                if (web_url_exists(web_root_node(node), full_url) ||
+                    web_url_exists(node, full_url)) {
+                    FREE(full_url);
+                    continue;
+                }
+                t_web_node *child = web_new_node_nochild(full_url, node);
+                if (child) {
+                    pthread_mutex_lock(&node->mutex);
+                    buffer_push(&node->child, &child);
+                    pthread_mutex_unlock(&node->mutex);
+                }
+                FREE(full_url);
+            }
+        }
+    }
+    return NULL;
+}
+
+void *process_tag_OLD(void *arg) {
+    thread_pool_t *pool = (thread_pool_t *)arg;
+    while (1) {
+        pthread_mutex_lock(&pool->mutex);
+
+        // Attendre qu'il y ait des tâches à traiter
+        while (pool->task_index >= pool->task_count) {
+            pthread_cond_wait(&pool->cond, &pool->mutex);
+        }
+
+        // Récupérer la tâche
+        thread_data_t data = pool->tasks[pool->task_index];
+        pool->task_index++;
+        pthread_mutex_unlock(&pool->mutex);
+
+        // Traiter la balise
+        t_web_node *node = data.node;
+        t_html_node *tag = data.tag;
+        char *full_url;
+        t_buf_param *param;
+        uint j;
+
+        for (j = 0; j < tag->param.size; j++) {
+            param = buffer_get_index(&tag->param, j);
+            if (strncasecmp(param->name, "href", STRING_SIZE) == 0) {
+                if (param->data.buf && *((char *)param->data.buf) == '#')
+                    continue;
+                if (strncasecmp(param->data.buf, "mailto:", strlen("mailto:")) == 0)
+                    continue;
+                full_url = url_get_full(node->request.url, param->data.buf);
+                if (web_url_exists(web_root_node(node), full_url) ||
+                    web_url_exists(node, full_url)) {
+                    FREE(full_url);
+                    continue;
+                }
+                t_web_node *child = web_new_node_nochild(full_url, node);
+                if (child) {
+                    pthread_mutex_lock(&node->mutex);
+                    buffer_push(&node->child, &child);
+                    pthread_mutex_unlock(&node->mutex);
+                }
+                FREE(full_url);
+            }
+        }
+    }
+    return NULL;
+}
+
+int web_shell_command_expand(char *input, t_web_node *node) {
+    struct s_buf list;
+    t_html_node *tag;
+    pthread_t threads[THREAD_COUNT];
+    thread_pool_t pool;
+
+    // Vérification des entrées
+    if (!node || !input)
+        return (1);
+
+    list = html_find_tag(&node->html, "a");
+    size_t num_tags = list.size;
+
+    // Initialiser le pool de threads
+    pool.tasks = malloc(num_tags * sizeof(thread_data_t));
+    pool.task_count = num_tags;
+    pool.task_index = 0;
+    pthread_mutex_init(&pool.mutex, NULL);
+    pthread_cond_init(&pool.cond, NULL);
+
+    // Remplir le pool de tâches
+    for (size_t i = 0; i < num_tags; i++) {
+        tag = *((t_html_node **)buffer_get_index(&list, i));
+        pool.tasks[i].node = node;
+        pool.tasks[i].tag = tag;
+    }
+
+    // Créer les threads
+    for (int i = 0; i < THREAD_COUNT; i++) {
+        pthread_create(&threads[i], NULL, process_tag, &pool);
+    }
+
+    // Signaler aux threads qu'il y a des tâches à traiter
+    pthread_mutex_lock(&pool.mutex);
+    pool.task_index = 0; // Réinitialiser l'index des tâches
+    pthread_cond_broadcast(&pool.cond); // Signaler tous les threads
+    pthread_mutex_unlock(&pool.mutex);
+
+    // Attendre que tous les threads se terminent
+    for (int i = 0; i < THREAD_COUNT; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    // Libération des ressources
+    free(pool.tasks);
+    pthread_mutex_destroy(&pool.mutex);
+    pthread_cond_destroy(&pool.cond);
+    buffer_free(&list);
+
+    return 0;
+}
+
+int             web_shell_command_expand_singlethread(char *input, t_web_node *node)
 {
     t_web_node              *child;
     struct s_buf            list;
@@ -4761,17 +5587,11 @@ int             web_shell_command_links(char *input, t_web_node *node)
             }
         }
     }
+    printf("Total links: %u\n", printed.size);
     buffer_free_string(&printed);
     return (0);
-    i = -1;
-    while (++i < printed.size)
-    {
-        full_url = (char *)buffer_get_index(&printed, i);
-        FREE(full_url);
-    }
-    buffer_free(&printed);
-    return (0);
 }
+
 int             web_shell(t_web_node *node);
 int             web_shell_command_goto(char *input, t_web_node *node)
 {
@@ -4800,6 +5620,972 @@ int             web_shell_command_goto(char *input, t_web_node *node)
     return (0);
 }
 
+char                  *web_port_get_service(uint port)
+{
+    if (port == 21)
+        return (string_strdup("FTP"));
+    if (port == 22)
+        return (string_strdup("SSH"));
+    if (port == 25)
+        return (string_strdup("SMTP"));
+    if (port == 80)
+        return (string_strdup("HTTP"));
+    if (port == 443)
+        return (string_strdup("HTTPS"));
+    if (port == 3306)
+        return (string_strdup("MySQL"));
+    return (string_strdup("Telnet"));
+}
+
+int             web_display_ip(t_web_ip *ip)
+{
+    t_web_port  *port;
+    uint        i;
+
+    if (!ip)
+        return (1);
+    printf("---------------\n");
+    printf("\tIP [%s]\n", ip->ip);
+    printf("\tVersion [%d]\n", ip->version);
+    printf("\tOpen ports [%d]\n", ip->port.size);
+    if (ip->port.size == 0)
+        return (0);
+    printf("\tServices: ");
+    i = -1;
+    while (++i < ip->port.size)
+    {
+        port = *((t_web_port **)buffer_get_index(&ip->port, i));
+        printf("[%u](%d)%s", i, port->number, port->service);
+        if (i + 1 < ip->port.size)
+            printf(", ");
+    }
+    printf("\n");
+    return (0);
+}
+
+int             web_display_host(t_web_host *host)
+{
+    uint        i;
+    char        *hostname;
+    t_web_ip    *ip;
+
+    if (!host)
+        return (1);
+    if (host->name)
+        printf("Hostname : %s\n", host->name);
+    i = -1;
+    while (++i < host->ip.size)
+    {
+        ip = *((t_web_ip **)buffer_get_index(&host->ip, i));
+        if (!ip)
+            continue;
+        printf("%u ", i);
+        web_display_ip(ip);
+    }
+    return (0);
+}
+
+t_web_transmission      *web_new_transmission(uint origin, char *data, uint length)
+{
+    t_web_transmission  *transmission;
+
+    if (!data || length == 0)
+        return (NULL);
+    if (!(transmission = ALLOC(sizeof(struct s_web_transmission))))
+        return (NULL);
+    memset(transmission, 0, sizeof(struct s_web_transmission));
+    if (!(transmission->data = ALLOC(length + 1)))
+    {
+        FREE(transmission);
+        return (NULL);
+    }
+    memset(transmission->data, 0, length + 1);
+    memcpy(transmission->data, data, length);
+    transmission->length = length;
+    return (transmission);
+}
+
+t_web_port            *web_new_port(uint number)
+{
+    t_web_port          *port;
+    char                *service;
+
+    if (!(port = ALLOC(sizeof(struct s_web_port))))
+        return (NULL);
+    memset(port, 0, sizeof(struct s_web_port));
+    port->transmission = buffer_new(sizeof(t_web_transmission), 0);
+    port->number = number;
+    if (!(service = web_port_get_service(number)))
+    {
+        FREE(port);
+        return (NULL);
+    }
+    strncpy(port->service, service, STRING_SIZE);
+    FREE(service);
+    /// scan port exchange
+    return (port);
+}
+
+t_web_ip            *web_new_ip(t_web_host *host, char *ipaddr)
+{
+    t_web_ip        *ip;
+
+    if (!host || !ipaddr)
+        return (NULL);
+    if (!(ip = ALLOC(sizeof(struct s_web_ip))))
+        return (NULL);
+    memset(ip, 0, sizeof(struct s_web_ip));
+    ip->port = buffer_new(sizeof(t_web_port), 0);
+    strncpy(ip->ip, ipaddr, STRING_SIZE);
+    if (url_is_ipv4(ipaddr))
+        ip->version = 4;
+    else if (url_is_ipv6(ipaddr))
+        ip->version = 6;
+    return (ip);
+}
+
+t_web_host          *web_new_host(t_web_node *parent)
+{
+    struct addrinfo     hints, *res, *p;
+    char                ipstr[INET6_ADDRSTRLEN];
+    char                *hostname;
+    t_web_host          *host;
+    t_web_ip            *ip;
+
+    if (!parent)
+        return (NULL);
+    if (!(host = ALLOC(sizeof(struct s_web_host))))
+        return (NULL);
+    memset(host, 0, sizeof(struct s_web_host));
+    host->ip = buffer_new(sizeof(t_web_ip), 0);
+    host->parent = parent;
+    if (!(hostname = url_get_host(parent->request.url)))
+    {
+        FREE(host);
+        return (NULL);
+    }
+    host->name = hostname;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC; // IPv4 ou IPv6
+    hints.ai_socktype = SOCK_STREAM;
+
+    int status = getaddrinfo(hostname, NULL, &hints, &res);
+    if (status != 0) {
+        printf("getaddrinfo: %s\n", gai_strerror(status));
+        web_free_host(host);
+        FREE(host);
+        return (NULL);
+    }
+
+    printf("Adresses IP pour %s:\n", hostname);
+    for (p = res; p != NULL; p = p->ai_next) {
+        void *addr;
+        // Vérifie si c'est une adresse IPv4 ou IPv6
+        if (p->ai_family == AF_INET) { // IPv4
+            struct sockaddr_in *ipv4 = (struct sockaddr_in *)p->ai_addr;
+            addr = &(ipv4->sin_addr);
+        } else { // IPv6
+            struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)p->ai_addr;
+            addr = &(ipv6->sin6_addr);
+        }
+
+        // Convertit l'adresse IP en chaîne de caractères
+        inet_ntop(p->ai_family, addr, ipstr, sizeof ipstr);
+        printf("  %s\n", ipstr);
+        if (!(ip = web_new_ip(host, ipstr)))
+        {
+            freeaddrinfo(res);
+            web_free_host(host);
+            FREE(host);
+            return (NULL);
+        }
+        if (buffer_push(&host->ip, &ip))
+        {
+            if (ip)
+            {
+                web_free_ip(ip);
+                FREE(ip);
+            }
+            freeaddrinfo(res);
+            web_free_host(host);
+            FREE(host);
+            return (NULL);
+        }
+    }
+    freeaddrinfo(res); // Libère la mémoire allouée par getaddrinfo
+    return (host);
+}
+
+void            web_shell_host_display_help(void)
+{
+    printf("----- HELP -----\n");
+    printf("exit : Return to parent node\n");
+    printf("return : Return to parent node\n");
+    printf("quit : Exit shell\n");
+    printf("info : Host informations\n");
+    printf("goto : Goto ip\n");
+    printf("----------------\n");
+}
+
+void            web_shell_host_display_prompt(t_web_host *host)
+{
+    char            *hostname;
+
+    if (!host || !host->parent)
+        return ;
+    hostname = url_get_host(host->parent->request.url);
+    printf("%s\n", hostname);
+    FREE(hostname);
+}
+
+void            web_display_transmission(t_web_transmission *trans)
+{
+    if (!trans)
+        return ;
+    printf("---------------\n");
+    if (trans->origin == 0)
+        printf("RECV:");
+    else
+        printf("SEND:");
+    printf("%u\n", trans->length);
+    debug_string(trans->data, trans->length);
+}
+
+void            web_shell_port_display_help(void)
+{
+    printf("----- HELP -----\n");
+    printf("exit : Return to parent node\n");
+    printf("return : Return to parent node\n");
+    printf("quit : Exit shell\n");
+    printf("info : Port informations\n");
+    printf("----------------\n");
+}
+
+void            web_display_port(t_web_port *port)
+{
+    uint                    i;
+    t_web_transmission      *trans;
+    if (!port)
+        return ;
+    printf("Port: %u\n", port->number);
+    printf("Service: %s\n", port->service);
+    printf("Transmission:\n");
+    i = -1;
+    while (++i < port->transmission.size)
+    {
+        trans = *((t_web_transmission **)buffer_get_index(&port->transmission, i));
+        if (!trans)
+            continue;
+        web_display_transmission(trans);
+    }
+}
+
+void            web_shell_port_display_prompt(t_web_port *port, char *ip)
+{
+    char            *hostname;
+
+    if (!port || !ip)
+        return ;
+    printf("%s:%u - [%s]\n", ip, port->number, port->service);
+}
+
+int             web_shell_port(t_web_port *port, char *ip, int ipversion)
+{
+    char            input[STRING_SIZE * 16]; // Pointeur pour la chaîne de caractères
+    size_t          len;
+    uint            i;
+
+    if (!port)
+        return (0);
+    memset(input, 0, STRING_SIZE * 16);
+    input[0] = 'a';
+    while (strncmp(input, "exit", strlen("exit")) != 0 && strncmp(input, "return", strlen("return")) != 0)
+    {
+        web_shell_port_display_prompt(port, ip);
+        printf(">");
+        if (fgets(input, sizeof(input), stdin) != NULL)
+        {
+            len = strlen(input);
+            if (len > 0 && input[len - 1] == '\n')
+                input[len - 1] = '\0';
+        }
+        else
+            return (1);
+        if (strlen(input) == 0)
+            continue;
+        if (strncmp(input, "quit", strlen("quit")) == 0)
+            return (1);
+        if (strncmp(input, "help", strlen("help")) == 0)
+            web_shell_port_display_help();
+        if (strncmp(input, "info", strlen("info")) == 0)
+            web_display_port(port);
+    }
+    return (0);
+}
+
+void            web_shell_ip_display_prompt(t_web_ip *ip)
+{
+    if (!ip)
+        return ;
+    printf("%s\n", ip->ip);
+}
+
+void            web_shell_ip_display_help(void)
+{
+    printf("----- HELP -----\n");
+    printf("exit : Return to host\n");
+    printf("return : Return to host\n");
+    printf("quit : Exit shell\n");
+    printf("info : IP informations\n");
+    printf("scan : Scan ports\n");
+    printf("goto : Goto protocol\n");
+    printf("----------------\n");
+}
+
+int             web_shell_ip_command_goto(char *input, t_web_ip *ip)
+{
+    t_web_port      *port;
+    char            *ptr;
+    int             i;
+
+    if (!input || !ip)
+        return (0);
+    if ((ptr = string_goto_numeric(input)))
+    {
+        i = atoi(ptr);
+        if (i < ip->port.size)
+        {
+            port = *((t_web_port **)buffer_get_index(&ip->port, (uint)i));
+            if (!port)
+                printf("Bad port index\n");
+            else if (web_shell_port(port, ip->ip, ip->version))
+                return (1);
+        }
+        else
+            printf("Bad port index\n");
+    }
+    else
+        printf("Usage: goto [index]\n");
+    return (0);
+}
+
+#include <netinet/ip6.h> // Pour struct ip6_hdr
+#include <netinet/ip.h>  // Pour struct iphdr
+#include <netinet/tcp.h> // Pour struct tcphdr
+
+unsigned short ComputeChecksum(unsigned char *data, int len)
+{
+    unsigned long sum = 0;  /* assume 32 bit long, 16 bit short */
+    unsigned short *temp = (unsigned short *)data;
+
+    while(len > 1)
+    {
+        sum += *temp++;
+        if(sum & 0x80000000)   // if high order bit set, fold
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        len -= 2;
+    }
+    if(len)       /* take care of left over byte */
+        sum += (unsigned short) *((unsigned char *)temp);
+    while(sum>>16)
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    sum = ~sum;
+    return sum;
+}
+
+// Fonction pour ajouter des options TCP
+uint add_tcp_options(uint8_t *options) {
+    uint i;
+
+    i = -1;
+    // Exemple d'ajout de l'option Maximum Segment Size (MSS)
+    options[++i] = 2; // Type d'option MSS
+    options[++i] = 4; // Longueur de l'option (4 octets)
+    options[++i] = 0x05; // MSS (0x05B4 = 1460)
+    options[++i] = 0xB4; // MSS (0x05B4 = 1460)
+
+    // Exemple d'ajout de l'option Window Scale
+    options[++i] = 4;//3; // Type d'option Window Scale
+    options[++i] = 2;//3; // Longueur de l'option (3 octets)
+    options[++i] = 8;//7; // Facteur de mise à l'échelle (0x07)
+
+    options[++i] = 0x0a;
+    options[++i] = 0x19;
+    options[++i] = 0x27;
+    options[++i] = 0x91;
+    options[++i] = 0xe6;
+    options[++i] = 0x00;
+    options[++i] = 0x00;
+    options[++i] = 0x00;
+    options[++i] = 0x00;
+    options[++i] = 0x01;
+    options[++i] = 0x03;
+    options[++i] = 0x03;
+    options[++i] = 0x07;
+    return (++i);
+}
+
+// Structure du pseudo-en-tête TCP
+struct pseudo_header {
+    uint32_t source_address;  // Adresse IP source
+    uint32_t dest_address;    // Adresse IP destination
+    uint8_t placeholder;       // Zéro
+    uint8_t protocol;         // Protocole (TCP = 6)
+    uint16_t tcp_length;      // Longueur de l'en-tête TCP + données
+};
+
+#include <time.h>
+
+uint            net_find_valid_port(void)
+{
+    int sockfd;
+    struct sockaddr_in server_addr;
+    int port;
+
+    // Créer un socket
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        return (-1);
+    }
+
+    // Initialiser la structure sockaddr_in
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY; // Accepter les connexions sur toutes les interfaces
+
+    //port = (short)(rand() % ((SHRT_MAX + 1) - PORT_MIN)) + PORT_MIN;
+    // Essayer de lier à un port valide
+    for (port = (short)(rand() % ((SHRT_MAX + 1) - PORT_MIN)) + PORT_MIN; port <= PORT_MAX; port++) {
+        server_addr.sin_port = htons(port);
+        if (bind(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == 0) {
+            close(sockfd);
+            return (port);
+        } else if (errno != EADDRINUSE) {
+            close(sockfd);
+            return (-1);
+        }
+    }
+
+    if (port > PORT_MAX) {
+        close(sockfd);
+        return (-1);
+    }
+    close(sockfd);
+    return (-1);
+}
+
+// Fonction pour construire un paquet TCP SYN
+uint create_syn_packet(char *packet, void *dest, int port, int src_port, int ipversion, struct in_addr dest_ip, struct in_addr src_ip) {
+    if (ipversion == 4) {
+        struct tcphdr *tcp_header = (struct tcphdr *)packet;
+        struct sockaddr_in *dest_4 = (struct sockaddr_in *)dest;
+
+        // Remplir l'en-tête TCP
+        memset(tcp_header, 0, sizeof(struct tcphdr));
+        ///memcpy(tcp_header, tcp_syn, sizeof(struct tcphdr));
+        tcp_header->source = htons(src_port);
+        tcp_header->dest = htons(port);
+        tcp_header->seq = 3093775308;
+        tcp_header->ack_seq = 0;
+        tcp_header->doff = 5; // 5 * 4 = 20 octets
+        tcp_header->syn = 1;
+        tcp_header->window = htons(64240);
+
+        uint optionlen;
+        optionlen = add_tcp_options(packet + sizeof(struct tcphdr));
+        tcp_header->doff += (optionlen + 3) / 4;
+
+        // Calculer la somme de contrôle
+        tcp_header->check = 0;
+        // Remplir le pseudo-en-tête
+        struct pseudo_header psh;
+        memcpy(&psh.source_address, &src_ip, sizeof(struct in_addr));
+        memcpy(&psh.dest_address, &dest_ip, sizeof(struct in_addr));
+        psh.placeholder = 0;
+        psh.protocol = IPPROTO_TCP;
+        psh.tcp_length = htons(sizeof(struct tcphdr) + optionlen);
+
+        // Calculer la somme de contrôle
+        int psize;
+        psize = sizeof(struct pseudo_header) + sizeof(struct tcphdr) + optionlen;
+        char *pseudogram = ALLOC(psize);
+
+        // Copier le pseudo-en-tête et l'en-tête TCP dans le tampon
+        memcpy(pseudogram, (char *)&psh, sizeof(struct pseudo_header));
+        //memcpy(pseudogram + sizeof(struct pseudo_header), (char *)tcp_header, sizeof(struct tcphdr) + optionlen);
+        memcpy(pseudogram + sizeof(struct pseudo_header), (char *)packet, sizeof(struct tcphdr) + optionlen);
+        // Calculer la somme de contrôle et l'insérer dans l'en-tête TCP
+        tcp_header->check = ComputeChecksum((unsigned char *)pseudogram, psize);
+
+        // Libérer la mémoire allouée
+        FREE(pseudogram);
+        return (optionlen);
+
+    } else if (ipversion == 6) {
+        struct tcphdr *tcp_header = (struct tcphdr *)packet;
+        struct sockaddr_in6 *dest_6 = (struct sockaddr_in6 *)dest;
+
+        // Remplir l'en-tête TCP
+        memset(tcp_header, 0, sizeof(struct tcphdr));
+        tcp_header->source = htons(12345);
+        tcp_header->dest = htons(port);
+        tcp_header->seq = 0;
+        tcp_header->ack_seq = 0;
+        tcp_header->doff = 5; // 5 * 4 = 20 octets
+        tcp_header->syn = 1;
+        tcp_header->window = htons(5840);
+
+        // Calculer la somme de contrôle
+        ///tcp_header->check = tcp_checksum_ipv6(ip_header, tcp_header);
+        return (0);
+    }
+}
+
+#include <ifaddrs.h>
+#include <net/if.h>
+
+char        *net_getsourceip(void)
+{
+    struct ifaddrs *ifaddr, *ifa;
+    char ip_str[INET6_ADDRSTRLEN]; // Pour stocker l'adresse IP sous forme de chaîne
+
+    // Obtenir la liste des interfaces réseau
+    if (getifaddrs(&ifaddr) == -1) {
+        printf("getifaddrs");
+        return (NULL);
+    }
+
+    // Parcourir les interfaces
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        // Vérifier si l'interface a une adresse
+        if (ifa->ifa_addr) {
+            // Vérifier si l'interface est active
+            if (ifa->ifa_flags & IFF_UP) {
+                // Vérifier si l'interface est IPv4
+                if (ifa->ifa_addr->sa_family == AF_INET) {
+                    // Convertir l'adresse IP en chaîne
+                    if (inet_ntop(AF_INET, &((struct sockaddr_in *)ifa->ifa_addr)->sin_addr, ip_str, sizeof(ip_str)) != NULL) {
+                        if (strncasecmp(ifa->ifa_name,
+                                        #ifdef _WIN32
+                                        "lo", strlen("lo"))
+                                        #else
+                                        "lo", strlen("lo"))
+                                        #endif
+                                        == 0
+                            )
+                            continue;
+                        //0printf("Interface: %s, IPv4 Address: %s\n", ifa->ifa_name, ip_str);
+                        freeifaddrs(ifaddr);
+                        return (string_strdup(ip_str));
+                    } else {
+                        printf("inet_ntop\n");
+                    }
+                }
+                // Vérifier si l'interface est IPv6
+                else if (ifa->ifa_addr->sa_family == AF_INET6) {
+                    // Convertir l'adresse IP en chaîne
+                    if (inet_ntop(AF_INET6, &((struct sockaddr_in6 *)ifa->ifa_addr)->sin6_addr, ip_str, sizeof(ip_str)) != NULL) {
+                        if (strncasecmp(ifa->ifa_name,
+                                        #ifdef _WIN32
+                                        "lo", strlen("lo"))
+                                        #else
+                                        "lo", strlen("lo"))
+                                        #endif
+                                        == 0
+                            )
+                            continue;
+                        //printf("Interface: %s, IPv6 Address: %s\n", ifa->ifa_name, ip_str);
+                        freeifaddrs(ifaddr);
+                        return (string_strdup(ip_str));
+                    } else {
+                        printf("inet_ntop\n");
+                    }
+                }
+            }
+        }
+    }
+    // Libérer la mémoire allouée par getifaddrs
+    freeifaddrs(ifaddr);
+    return (NULL);
+}
+
+// Fonction pour scanner un port
+int         scan_port(void *dest, char *ipdest, int port, int src_port, int ipversion)
+{
+    int                 sock;
+    char                packet[4096];
+    struct sockaddr_in  from;
+    socklen_t           from_len = sizeof(from);
+    int                 received;
+
+    // Créer un socket brut
+    if (ipversion == 4)
+    {
+        if ((sock = socket(AF_INET, SOCK_RAW, IPPROTO_TCP)) < 0) {
+            printf("Error socket\n");
+            return (0);
+        }
+    }
+    else if (ipversion == 6)
+    {
+        if ((sock = socket(AF_INET6, SOCK_RAW, IPPROTO_TCP)) < 0) {
+            printf("Error socket\n");
+            return (0);
+        }
+    }
+    else
+        sock = -1;
+
+    // Définir le timeout pour la réception
+    struct timeval tv;
+    tv.tv_sec = TIMEOUT;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+
+    // Obtenir l'adresse IP source
+    char *source_ip;
+    struct in_addr src_ip, dest_ip;
+
+    source_ip = net_getsourceip();
+    if (ipversion == 4)
+    {
+        // Convertir la chaîne en in_addr
+        if (inet_pton(AF_INET, source_ip, &src_ip) <= 0) {
+            printf("inet_pton failed\n");
+            return (0);
+        }
+    }
+    else if (ipversion == 6)
+    {
+        ; /// TODO
+    }
+    FREE(source_ip);
+
+    if (ipversion == 4)
+    {
+        // Convertir la chaîne en in_addr
+        if (inet_pton(AF_INET, ipdest, &dest_ip) <= 0) {
+            printf("inet_pton failed\n");
+            return (0);
+        }
+    }
+    else if (ipversion == 6)
+    {
+        ; /// TODO
+    }
+
+    uint option_len;
+
+    // Envoyer le paquet SYN
+    if (ipversion == 4) {
+        // Créer le paquet SYN
+        option_len = create_syn_packet(packet, dest, port, src_port, ipversion, dest_ip, src_ip);
+        if (sendto(sock, packet, sizeof(struct tcphdr) + option_len, 0, (struct sockaddr *)dest, sizeof(struct sockaddr_in)) < 0) {
+            printf("Sendto error\n");
+            close(sock);
+            return (0);
+        }
+    } else if (ipversion == 6) {
+        if (sendto(sock, packet, sizeof(struct tcphdr) + option_len, 0, (struct sockaddr *)dest, sizeof(struct sockaddr_in6)) < 0) {
+            printf("Sendto error\n");
+            close(sock);
+            return (0);
+        }
+    }
+
+    // Attendre une réponse
+    uint k;
+    k = -1;
+    while ((received = recvfrom(sock, packet, sizeof(packet), 0, (struct sockaddr *)&from, &from_len)) >= 0)
+    {
+        struct tcphdr *tcp_header = (struct tcphdr *)(packet + sizeof(struct iphdr));
+        if (ntohs(tcp_header->source) == port)
+        {
+            if (tcp_header->syn == 1 && tcp_header->ack == 1) {
+                //printf("OPEN\n"); //
+                close(sock);
+                return (1);
+            } else if (tcp_header->rst == 1) {
+                close(sock);
+                return (0);
+            }
+        }
+    }
+    close(sock);
+    return (0);
+}
+
+int             web_port_exists(t_buf *portlist, t_web_port *port)
+{
+    uint            i;
+    t_web_port      *p;
+
+    if (!portlist || !port)
+        return (0);
+    i = -1;
+    while (++i < portlist->size)
+    {
+        p = *((t_web_port **)buffer_get_index(portlist, i));
+        if (!p)
+            continue;
+        if (p->number == port->number)
+            return (1);
+    }
+    return (0);
+}
+
+typedef struct s_scan_args
+{
+    uint                port;
+    struct sockaddr_in  dest;
+    char                *ipdest;
+    struct sockaddr_in  source;
+    int                 ipversion;
+    int                 open;
+    int                 thread_index;
+}               t_scan_args;
+
+void *net_thread_scan_port(void *args) {
+    t_scan_args     *scan_args = (t_scan_args *)args;
+    int result;
+    #define SOURCE_PORT     27890
+
+    result = scan_port(&scan_args->dest, scan_args->ipdest, scan_args->port, SOURCE_PORT + scan_args->thread_index, scan_args->ipversion);
+    scan_args->open = 0;
+    if (result == 1) {
+        printf("Port %d open\n", scan_args->port);
+        scan_args->open = result;
+    }
+    return (NULL);
+}
+
+int             web_shell_ip_command_scan(char *input, t_web_ip *ip)
+{
+    struct sockaddr_in  dest;
+    t_web_port          *port;
+
+    if (!input || !ip)
+        return (1);
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_port = htons(0); // Port non utilisé ici
+    if (ip->version == 4)
+    {
+        dest.sin_family = AF_INET;
+        inet_pton(AF_INET, ip->ip, &dest.sin_addr); // Tarzan
+    }
+    else if (ip->version == 6)
+    {
+        dest.sin_family = AF_INET6;
+        inet_pton(AF_INET6, ip->ip, &dest.sin_addr); // Tarzan
+    }
+
+    ////////////////////////////////////////////
+    pthread_t threads[THREAD_COUNT];
+    //struct s_web_port scan_args[THREAD_COUNT];
+    struct s_scan_args  scan_args[THREAD_COUNT + 5];
+    memset(scan_args, 0, sizeof(struct s_scan_args) * THREAD_COUNT);
+
+    for (int portnumber = 1; portnumber <= PORT_MAX; portnumber++)
+    {
+        scan_args[(portnumber - 1) % THREAD_COUNT].port = portnumber;
+        scan_args[(portnumber - 1) % THREAD_COUNT].dest = dest;
+        scan_args[(portnumber - 1) % THREAD_COUNT].ipversion = ip->version;
+        scan_args[(portnumber - 1) % THREAD_COUNT].ipdest = (char *)&ip->ip;
+        scan_args[(portnumber - 1) % THREAD_COUNT].thread_index = (portnumber - 1) % THREAD_COUNT;
+        scan_args[(portnumber - 1) % THREAD_COUNT].open = 0;
+
+        // Créer un thread pour scanner le port
+        if (pthread_create(&threads[(portnumber - 1) % THREAD_COUNT], NULL, net_thread_scan_port, &scan_args[(portnumber - 1) % THREAD_COUNT]) != 0) {
+            printf("Erreur lors de la création du thread\n");
+        }
+
+        if (portnumber % 1500 == 0)
+            printf("Testing ports %d...\n", portnumber); //
+        // Attendre que le thread se termine si nous avons atteint le nombre maximum de threads
+        if (portnumber % THREAD_COUNT == 0) {
+            for (int i = 0; i < THREAD_COUNT; i++) {
+                pthread_join(threads[i], NULL);
+                if (scan_args[i].open == 0)
+                    continue;
+                if (!(port = web_new_port(scan_args[i].port)))
+                {
+                    printf("Error skipping %u\n", i);
+                    continue;
+                }
+                if (web_port_exists(&ip->port, port))
+                {
+                    web_free_port(port);
+                    FREE(port);
+                    continue;
+                }
+                if (buffer_push(&ip->port, &port))
+                {
+                    printf("Error skipping %u\n", i);
+                    web_free_port(port);
+                    FREE(port);
+                    continue;
+                }
+            }
+            memset(scan_args, 0, sizeof(struct s_scan_args) * THREAD_COUNT);
+        }
+    }
+
+    // Attendre les threads restants
+    for (int i = 0; i < PORT_MAX % THREAD_COUNT; i++) {
+        pthread_join(threads[i], NULL);
+        if (scan_args[(i - 1) % THREAD_COUNT].open != 1)
+            continue;
+        if (!(port = web_new_port(scan_args[(i - 1) % THREAD_COUNT].port)))
+        {
+            printf("Error skipping %u\n", i);
+            continue;
+        }
+        if (web_port_exists(&ip->port, port))
+        {
+            web_free_port(port);
+            FREE(port);
+            continue;
+        }
+        if (buffer_push(&ip->port, &port))
+        {
+            printf("Error skipping %u\n", i);
+            web_free_port(port);
+            FREE(port);
+            continue;
+        }
+    }
+    ////////////////////////////////////////////
+    /*
+    for (int portnumber = 1; portnumber <= MAX_PORT; portnumber++) {
+        if (scan_port(&dest, portnumber, ip->version))
+        {
+            if (!(port = web_new_port(portnumber)))
+            {
+                printf("Error skipping %u\n", portnumber);
+                continue;
+            }
+            if (web_port_exists(&ip->port, port))
+            {
+                web_free_port(port);
+                FREE(port);
+                continue;
+            }
+            if (buffer_push(&ip->port, &port))
+            {
+                printf("Error skipping %u\n", portnumber);
+                web_free_port(port);
+                FREE(port);
+                continue;
+            }
+        }
+    }
+    return (0);
+    */
+}
+
+int             web_shell_ip(t_web_ip *ip)
+{
+    char            input[STRING_SIZE * 16]; // Pointeur pour la chaîne de caractères
+    size_t          len;
+    uint            i;
+
+    if (!ip)
+        return (0);
+    memset(input, 0, STRING_SIZE * 16);
+    input[0] = 'a';
+    while (strncmp(input, "exit", strlen("exit")) != 0 && strncmp(input, "return", strlen("return")) != 0)
+    {
+        web_shell_ip_display_prompt(ip);
+        printf(">");
+        if (fgets(input, sizeof(input), stdin) != NULL)
+        {
+            len = strlen(input);
+            if (len > 0 && input[len - 1] == '\n')
+                input[len - 1] = '\0';
+        }
+        else
+            return (1);
+        if (strlen(input) == 0)
+            continue;
+        if (strncmp(input, "quit", strlen("quit")) == 0)
+            return (1);
+        if (strncmp(input, "help", strlen("help")) == 0)
+            web_shell_ip_display_help();
+        if (strncmp(input, "info", strlen("info")) == 0)
+            web_display_ip(ip);
+        if (strncmp(input, "scan", strlen("scan")) == 0)
+            web_shell_ip_command_scan(input, ip);
+        if (strncmp(input, "goto", strlen("goto")) == 0)
+            if (web_shell_ip_command_goto(input, ip))
+                return (1);
+    }
+    return (0);
+}
+
+int             web_shell_host_command_goto(char *input, t_web_host *host)
+{
+    t_web_ip        *ip;
+    char            *ptr;
+    int             i;
+
+    if (!input || !host)
+        return (0);
+    if ((ptr = string_goto_numeric(input)))
+    {
+        i = atoi(ptr);
+        if (i < host->ip.size)
+        {
+            ip = *((t_web_ip **)buffer_get_index(&host->ip, (uint)i));
+            if (!ip)
+                printf("Bad ip index\n");
+            else if (web_shell_ip(ip))
+                return (1);
+        }
+        else
+            printf("Bad ip index\n");
+    }
+    else
+        printf("Usage: goto [index]\n");
+    return (0);
+}
+
+int             web_shell_host(t_web_host *host)
+{
+    char            input[STRING_SIZE * 16]; // Pointeur pour la chaîne de caractères
+    size_t          len;
+    uint            i;
+
+    if (!host)
+        return (0);
+    memset(input, 0, STRING_SIZE * 16);
+    input[0] = 'a';
+    while (strncmp(input, "exit", strlen("exit")) != 0 && strncmp(input, "return", strlen("return")) != 0)
+    {
+        web_shell_host_display_prompt(host);
+        printf(">");
+        if (fgets(input, sizeof(input), stdin) != NULL)
+        {
+            len = strlen(input);
+            if (len > 0 && input[len - 1] == '\n')
+                input[len - 1] = '\0';
+        }
+        else
+            return (1);
+        if (strlen(input) == 0)
+            continue;
+        if (strncmp(input, "quit", strlen("quit")) == 0)
+            return (1);
+        if (strncmp(input, "help", strlen("help")) == 0)
+            web_shell_host_display_help();
+        if (strncmp(input, "info", strlen("info")) == 0)
+            web_display_host(host);
+        if (strncmp(input, "goto", strlen("goto")) == 0)
+            if (web_shell_host_command_goto(input, host))
+                return (1);
+    }
+    return (0);
+}
+
 int             web_shell(t_web_node *node)
 {
     char            input[STRING_SIZE * 16]; // Pointeur pour la chaîne de caractères
@@ -4819,7 +6605,7 @@ int             web_shell(t_web_node *node)
     input[0] = 'a';
     while (strncmp(input, "exit", strlen("exit")) != 0 && strncmp(input, "return", strlen("return")) != 0)
     {
-        web_shell_display_prompt(node);
+        web_shell_display_prompt(node, 8);
         printf(">");
         if (fgets(input, sizeof(input), stdin) != NULL)
         {
@@ -4897,6 +6683,25 @@ int             web_shell(t_web_node *node)
             web_shell_command_expandallnotsamesite(input, node);
         if (strncmp(input, "mail", strlen("mail")) == 0)
             web_shell_command_mail(input, node);
+        if (strncmp(input, "host", strlen("host")) == 0)
+        {
+            t_web_host *host;
+
+            if (node->host)
+            {
+                if (web_shell_host(node->host))
+                    return (1);
+            }
+            else
+            {
+                if ((host = web_new_host(node)))
+                {
+                    node->host = host;
+                    if (web_shell_host(host))
+                        return (1);
+                }
+            }
+        }
         if (strncmp(input, "content", STRING_SIZE) == 0)
         {
             if (node->response.buf)
@@ -4999,7 +6804,7 @@ void            test_http(char *url)
     printf("RECV [%s]\n", recv);
 
     struct s_http_response response;
-    response = http_new_response(recv);
+    response = http_new_response(recv, NULL);
 
     http_display_response(&response);
 }
@@ -5248,113 +7053,76 @@ int         test_ipv6(void)
 
 int main(int ac, char **av)
 {
-    char    *xml = "<web>\
-	<request method='GET' url='http://hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion/'>\
-		<header User-Agent=\"custom\"/>\
-		<header Host=\"hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion\"/>\
-	</request>\
-	<response version='HTTP/1.1' code='200'>\
-		<header Date=\"Fri, 21 Feb 2025 11:32:36 GMT\"/>\
-		<header Server=\"Apache/2.4.41 (Ubuntu)\"/>\
-		<header X-Frame-Options=\"SAMEORIGIN\"/>\
-		<header X-Content-Type-Options=\"nosniff\"/>\
-		<header Expires=\"Thu, 19 Nov 1981 08:52:00 GMT\"/>\
-		<header Cache-Control=\"private, no-cache, max-age=0\"/>\
-		<header Set-Cookie=\"xf_csrf=VES7fIfmRBLMS_Yz; path=/\"/>\
-		<header Last-Modified=\"Fri, 21 Feb 2025 11:32:36 GMT\"/>\
-		<header Vary=\"Accept-Encoding\"/>\
-		<header Transfer-Encoding=\"chunked\"/>\
-		<header Content-Type=\"text/html; charset=utf-8\"/>\
-		<content>\
-			2000\
-			<!DOCTYPE html>\
-			<html id=\"XF\" lang=\"en-US\" dir=\"LTR\"\
-				data-app=\"public\"\
-				data-template=\"forum_list\"\
-				data-container-key=\"\"\
-				data-content-key=\"\"\
-				data-logged-in=\"false\"\
-				data-cookie-prefix=\"xf_\"\
-				class=\"has-no-js template-forum_list\"\
-				data-run-jobs=\"\">\
-			</html>\
-		</content>\
-	</response>\
-	<web>\
-		<request method='GET' url='http://hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion/pgp.txt'>\
-			<header User-Agent=\"custom\"/>\
-			<header Host=\"hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion\"/>\
-		</request>\
-		<response version='HTTP/1.1' code='200'>\
-			<header Date=\"Fri, 21 Feb 2025 11:33:51 GMT\"/>\
-			<header Server=\"Apache/2.4.41 (Ubuntu)\"/>\
-			<header Last-Modified=\"Sun, 06 Oct 2024 14:00:20 GMT\"/>\
-			<header ETag=\"cbc-623cf5325380e\"/>\
-			<header Accept-Ranges=\"bytes\"/>\
-			<header Content-Length=\"3260\"/>\
-			<header Vary=\"Accept-Encoding\"/>\
-			<header Content-Type=\"text/plain\"/>\
-			<content>-----BEGIN PGP PUBLIC KEY BLOCK-----</content>\
-		</response>\
-	</web>\
-</web>";
+    int sock;
+    struct sockaddr_in server_addr;
+    SSL_CTX *ctx;
+    SSL *ssl;
 
-    char        *script = "<web>\
-	<request method='GET' url='http://hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion/'>\
-		<header User-Agent=\"custom\"/>\
-		<header Host=\"hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion\"/>\
-	</request>\
-	<response version='HTTP/1.1' code='200'>\
-		<header Date=\"Fri, 21 Feb 2025 11:32:36 GMT\"/>\
-		<header Server=\"Apache/2.4.41 (Ubuntu)\"/>\
-		<header X-Frame-Options=\"SAMEORIGIN\"/>\
-		<header X-Content-Type-Options=\"nosniff\"/>\
-		<header Expires=\"Thu, 19 Nov 1981 08:52:00 GMT\"/>\
-		<header Cache-Control=\"private, no-cache, max-age=0\"/>\
-		<header Set-Cookie=\"xf_csrf=VES7fIfmRBLMS_Yz; path=/\"/>\
-		<header Last-Modified=\"Fri, 21 Feb 2025 11:32:36 GMT\"/>\
-		<header Vary=\"Accept-Encoding\"/>\
-		<header Transfer-Encoding=\"chunked\"/>\
-		<header Content-Type=\"text/html; charset=utf-8\"/>\
-		<content>\
-		<html>\
-	<script src=\"/js/vendor/jquery/jquery-3.5.1.min.js?_v=c58f955f\"></script>\
-	<script src=\"/js/vendor/vendor-compiled.js?_v=c58f955f\"></script>\
-	<script src=\"/js/xf/core-compiled.js?_v=c58f955f\"></script>\
-	<script>\
-	XF.samViewCountMethod = \"view\";\
-	XF.samServerTime = 1740314851;\
-	XF.samItem = \".samItem\";\
-	XF.samCodeUnit = \".samCodeUnit\";\
-	XF.samBannerUnit = \".samBannerUnit\";\
-</script></html></content>\
-	</response>\
-	</web>";
+    init_openssl();
+    ctx = create_context();
+    configure_context(ctx);
 
-	//t_web_node *node;
-    //node = web_import_xml(script);
-    //web_shell(node);
+    // Créer un socket
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        perror("Unable to create socket");
+        exit(EXIT_FAILURE);
+    }
+
+    // Configurer l'adresse du serveur
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(443);
+    inet_pton(AF_INET, "142.250.178.132", &server_addr.sin_addr); // Remplacez par l'adresse IP du serveur
+
+    // Établir la connexion
+    if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        perror("Connection failed");
+        close(sock);
+        exit(EXIT_FAILURE);
+    }
+
+    // Créer un objet SSL
+    ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, sock);
+
+    // Établir la connexion SSL
+    if (SSL_connect(ssl) <= 0) {
+        ERR_print_errors_fp(stderr);
+    } else {
+        printf("SSL connection established\n");
+    }
+
+    // Ici, vous pouvez envoyer et recevoir des données via SSL
+
+    // Fermer la connexion SSL et le socket
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    close(sock);
+    SSL_CTX_free(ctx);
+    cleanup_openssl();
+
     if (1)
     {
         t_web_node  *node;
 
-        /// TODO CRASH
-        /// http://hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion/posts/103897/
-
         //node = web_new_node("http://www.bbcnewsd73hkzno2ini43t4gblxvycyac5aw4gnv7t2rccijh7745uqd.onion/", NULL, 1);
         if (ac != 2)
             node = web_new_node("http://hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion/", NULL, 1);
+            //node = web_new_node("http://www.allorank.com/", NULL, 1);
         else
             node = web_new_node(av[1], NULL, 1);
+        ///t_web_host *host;
+
+        ///host = web_new_host(node);
+        ///web_shell_host(host);
+
+        //web_free_host(host);
+        //FREE(host);
+        ///web_free_node(node); // Crash
+        //FREE(node);
+        //DEBUG
         web_shell(node);
     }
-    //test_http(av[1]);
-    //test_web();
-    //test_parser();
-    ///test_import_export(av[1]);
-    //test_connection();
-    ///test_socks5();
-    //test_windows_connection();
-    //test_web();
     return (0);
 }
