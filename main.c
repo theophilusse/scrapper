@@ -35,7 +35,7 @@
 #define PORT_MIN 1024
 #define PORT_MAX 65535
 #define TIMEOUT 5 // Timeout en secondes
-#define THREAD_COUNT 1 /// More than 1 bug
+#define THREAD_COUNT 400 /// More than 1 bug
 
 #define STRING_SIZE 128
 
@@ -732,8 +732,6 @@ t_buf_param         *buffer_new_param(char *trail, char **end)
     param->data.blocksize = 1;
     param->data.size = strlen(string);
     param->data.buf = string;
-    ///printf("\t\t\t\t\t\t\tparam @ %p\n", param);
-    ///buffer_display_param(param, 9);//
     return (param);
 }
 
@@ -1050,6 +1048,163 @@ struct s_buf        html_get_param_name(t_html_node *node, char *name)
                 return (array);
             buffer_set_index(&array, count - 1, &param);
         }
+    }
+    return (array);
+}
+
+struct s_buf    html_find_tag_param(t_html_node *node, char *tagname, char *paramname, char *id)
+{
+    struct s_buf    array;
+    struct s_buf    merge;
+    int             i;
+
+    array.blocksize = sizeof(t_html_node *);
+    array.size = 0;
+    array.buf = NULL;
+    if (!node || !tagname || !paramname || !id)
+        return (array);
+
+    struct s_buf    param;
+    t_buf_param     *p;
+    param = html_get_param_name(node, paramname);
+    i = -1;
+    if (strncmp(node->tag, tagname, strlen(node->tag)) == 0)
+        while (++i < param.size)
+        {
+            p = *((t_buf_param **)buffer_get_index(&param, i));
+            if (!p)
+                continue;
+            if (strncmp(p->data.buf, id, strlen(id)) == 0)
+            {
+                buffer_push(&array, &node);
+                break;
+            }
+        }
+    buffer_free(&param);
+    i = -1;
+    while (++i < node->child.size)
+    {
+        merge = html_find_tag_param((t_html_node *)buffer_get_index(&node->child, i), tagname, paramname, id);
+        if (merge.size != 0 && buffer_concat(&array, &merge))
+            return (array);
+        buffer_free(&merge);
+    }
+    return (array);
+}
+
+struct s_buf    html_find_param(t_html_node *node, char *paramname, char *id)
+{
+    struct s_buf    array;
+    struct s_buf    merge;
+    int             i;
+
+    array.blocksize = sizeof(t_html_node *);
+    array.size = 0;
+    array.buf = NULL;
+    if (!node || !paramname || !id)
+        return (array);
+
+    struct s_buf    param;
+    t_buf_param     *p;
+    param = html_get_param_name(node, paramname);
+    i = -1;
+    while (++i < param.size)
+    {
+        p = *((t_buf_param **)buffer_get_index(&param, i));
+        if (!p)
+            continue;
+        if (strncmp(p->data.buf, id, strlen(id)) == 0)
+        {
+            buffer_push(&array, &node);
+            break;
+        }
+    }
+    buffer_free(&param);
+    i = -1;
+    while (++i < node->child.size)
+    {
+        merge = html_find_param((t_html_node *)buffer_get_index(&node->child, i), paramname, id);
+        if (merge.size != 0 && buffer_concat(&array, &merge))
+            return (array);
+        buffer_free(&merge);
+    }
+    return (array);
+}
+
+struct s_buf    html_find_class(t_html_node *node, char *name)
+{
+    struct s_buf    array;
+    struct s_buf    merge;
+    int             i;
+
+    array.blocksize = sizeof(t_html_node *);
+    array.size = 0;
+    array.buf = NULL;
+    if (!node || !name)
+        return (array);
+
+    struct s_buf    param;
+    t_buf_param     *p;
+    param = html_get_param_name(node, "class");
+    i = -1;
+    while (++i < param.size)
+    {
+        p = *((t_buf_param **)buffer_get_index(&param, i));
+        if (!p)
+            continue;
+        if (strncmp(p->data.buf, name, strlen(name)) == 0)
+        {
+            buffer_push(&array, &node);
+            break;
+        }
+    }
+    buffer_free(&param);
+    i = -1;
+    while (++i < node->child.size)
+    {
+        merge = html_find_class((t_html_node *)buffer_get_index(&node->child, i), name);
+        if (merge.size != 0 && buffer_concat(&array, &merge))
+            return (array);
+        buffer_free(&merge);
+    }
+    return (array);
+}
+
+struct s_buf    html_find_id(t_html_node *node, char *id)
+{
+    struct s_buf    array;
+    struct s_buf    merge;
+    int             i;
+
+    array.blocksize = sizeof(t_html_node *);
+    array.size = 0;
+    array.buf = NULL;
+    if (!node || !id)
+        return (array);
+
+    struct s_buf    param;
+    t_buf_param     *p;
+    param = html_get_param_name(node, "id");
+    i = -1;
+    while (++i < param.size)
+    {
+        p = *((t_buf_param **)buffer_get_index(&param, i));
+        if (!p)
+            continue;
+        if (strncmp(p->data.buf, id, strlen(id)) == 0)
+        {
+            buffer_push(&array, &node);
+            break;
+        }
+    }
+    buffer_free(&param);
+    i = -1;
+    while (++i < node->child.size)
+    {
+        merge = html_find_id((t_html_node *)buffer_get_index(&node->child, i), id);
+        if (merge.size != 0 && buffer_concat(&array, &merge))
+            return (array);
+        buffer_free(&merge);
     }
     return (array);
 }
@@ -1529,22 +1684,23 @@ char     *url_get_host(char *url)
     endofstring = url;
     while (*endofstring && *endofstring != '/' && *endofstring != ':')
         endofstring++;
-    if (!*endofstring)
-        return (NULL);
-    char *ptr;
-    ptr = endofstring;
-    if (*ptr == ':')
+    if (*endofstring)
     {
-        ptr++;
-        while (*ptr && *ptr != '/' && *ptr != ':')
-            ptr++;
+        char *ptr;
+        ptr = endofstring;
         if (*ptr == ':')
         {
-            endofstring = ptr;
-            while (*endofstring && *endofstring != '/')
-                endofstring++;
-            if (!*endofstring)
-                return (NULL);
+            ptr++;
+            while (*ptr && *ptr != '/' && *ptr != ':')
+                ptr++;
+            if (*ptr == ':')
+            {
+                endofstring = ptr;
+                while (*endofstring && *endofstring != '/')
+                    endofstring++;
+                if (!*endofstring)
+                    return (NULL);
+            }
         }
     }
     size = endofstring - url;
@@ -1556,22 +1712,38 @@ char     *url_get_host(char *url)
 
 char        *url_get_domain(char *url)
 {
-    char        *ptr;
-    char        *host;
-    char        *domain;
+    // Vérifier si l'URL est NULL
+    if (url == NULL) {
+        return NULL;
+    }
 
-    if (!url || !(host = url))
-        return (NULL);
-    if (string_count_char(host, '.', strlen(host)) <= 1)
-        return (string_strdup(host));
-    ptr = host + strlen(host);
-    while (*ptr != '.')
-        ptr--;
-    ptr--;
-    while (*ptr != '.')
-        ptr--;
-    domain = string_duplicate(ptr + 1, strlen(ptr));
-    FREE(host);
+    // Trouver le début du domaine
+    char* start = strstr(url, "://");
+    if (start) {
+        start += 3; // Passer "://"
+    } else {
+        start = url; // Pas de schéma, commencer au début
+    }
+
+    // Trouver la fin du domaine
+    const char* end = strchr(start, '/');
+    if (end == NULL) {
+        end = start + strlen(start); // Pas de chemin, aller jusqu'à la fin
+    }
+
+    // Calculer la longueur du domaine
+    size_t domain_length = end - start;
+
+    // Allouer de la mémoire pour le domaine
+    char* domain = (char*)ALLOC(domain_length + 1);
+    if (domain == NULL) {
+        return NULL; // Échec de l'allocation
+    }
+
+    // Copier le domaine dans la nouvelle chaîne
+    strncpy(domain, start, domain_length);
+    domain[domain_length] = '\0'; // Terminer la chaîne
+
     return (domain);
 }
 
@@ -1658,6 +1830,7 @@ typedef struct s_net_connection
     struct sockaddr_in server, cli;
     struct sockaddr_in6 server_6;
     #endif
+    char        *hostname;
     int ssl_enabled;
     #ifdef SSL_ENABLED
     SSL_CTX *ctx;
@@ -1682,30 +1855,42 @@ SSL_CTX *create_context()
     const SSL_METHOD *method;
     SSL_CTX *ctx;
 
-    method = SSLv23_client_method();
-    ctx = SSL_CTX_new(method);
-    if (!ctx) {
-        ERR_print_errors_fp(stderr);
-        return (NULL);
+    if (1)
+    {
+        method = SSLv23_client_method();
+        ctx = SSL_CTX_new(method);
+        if (!ctx) {
+            ERR_print_errors_fp(stderr);
+            return (NULL);
+        }
+        return (ctx);
     }
-    return (ctx);
-    /**
-    SSL_CTX *ctx;
-
-    ctx = SSL_CTX_new(TLS_client_method());
-    if (!ctx) {
-        //ERR_print_errors_fp(stderr);
-        return (NULL);
+    else
+    {
+        ctx = SSL_CTX_new(TLS_client_method());
+        if (!ctx) {
+            //ERR_print_errors_fp(stderr);
+            return (NULL);
+        }
+        return (ctx);
     }
-    return (ctx);
-    */
 }
 
-void configure_context(SSL_CTX *ctx) {
+void configure_context(SSL_CTX *ctx)
+{
     // Set the default verification paths
     ///SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
     SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
     SSL_CTX_set_verify_depth(ctx, 1);
+    // Set minimum protocol version
+    if (SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION) != 1)
+    {
+        ERR_print_errors_fp(stdin);
+    }
+    if (SSL_CTX_set_cipher_list(ctx, "ALL:!ADH:!LOW:!EXP:!MD5:@STRENGTH"))
+    {
+        ERR_print_errors_fp(stdin);
+    }
 }
 #endif
 
@@ -1713,7 +1898,7 @@ struct s_net_connection     net_new_onion_connection(char *host, int port, int s
 {
     struct s_net_connection     con;
 
-    printf("Connecting to [%s] Port: %d\n", host, port);
+    ///printf("Connecting to [%s] Port: %d\n", host, port);
     memset(&con, 0, sizeof(struct s_net_connection));
     if (!host || port < 0)
         return (con);
@@ -1765,14 +1950,17 @@ struct s_net_connection     net_new_onion_connection(char *host, int port, int s
     return (con);
 }
 
-struct s_net_connection     net_new_connection(char *ip, int port, int ssl)
+struct s_net_connection     net_new_connection(char *ip, char *hostname, int port, int ssl)
 {
     struct s_net_connection     con;
 
-    printf("Connecting to [%s] Port: %d\n", ip, port);
+    ///printf("Connecting to [%s] Port: %d\n", ip, port);
     memset(&con, 0, sizeof(struct s_net_connection));
+    con.sock = -1;
     if (!ip || port < 0)
         return (con);
+    if (hostname)
+        con.hostname = string_strdup(hostname);
     con.port = port;
     strncpy(con.ip, ip, strlen(ip));
     #ifdef _WIN32
@@ -1788,11 +1976,11 @@ struct s_net_connection     net_new_connection(char *ip, int port, int ssl)
     {
         con.sock = socket(AF_INET6, SOCK_STREAM, 0);
     }
-    else
+    else if (url_is_ipv4(ip))
     {
         con.sock = socket(AF_INET, SOCK_STREAM, 0);
     }
-    printf("Socket [%d]\n", con.sock); //
+    ///printf("Socket [%d]\n", con.sock); //
     if (con.sock == -1)
     {
         printf("Invalid socket.\n");
@@ -1831,6 +2019,7 @@ struct s_net_connection     net_new_connection(char *ip, int port, int ssl)
     tv.tv_sec = TIMEOUT;
     tv.tv_usec = 0;
     setsockopt(con.sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+    setsockopt(con.sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
     // Définir le TTL
     int ttl = 16;
     if (setsockopt(con.sock, IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl)) < 0) {
@@ -1904,7 +2093,7 @@ int         net_socks5_connect_host(t_net_connection *con, char *host)
     if (!con || !host)
         return (1);
 
-    printf("Sock5 Authentication\n");
+    ///printf("Sock5 Authentication\n");
     // Authentification (pas d'authentification)
     buf[0] = SOCKS5_VERSION; // Version SOCKS5
     buf[1] = 0x01;           // Nombre de méthodes d'authentification
@@ -1915,37 +2104,37 @@ int         net_socks5_connect_host(t_net_connection *con, char *host)
         return (1);
     }
     memset(buf, 0, 256);
-    printf("Waiting...\n");
+    ///printf("Waiting...\n");
     // Recevoir la réponse du proxy
     if (recv(con->sock, buf, 2, 0) < 0) {
         perror("recv");
         close(con->sock);
         return (1);
     }
-    printf("Sock5 version : [%d]\n", buf[0]);
-    printf("Response : [%d - ", buf[1]);
+    ///printf("Sock5 version : [%d]\n", buf[0]);
+    ///printf("Response : [%d - ", buf[1]);
     switch (buf[1])
     {
         case 0:
-            printf("NO AUTHENTICATION REQUIRED]\n");
+            ///printf("NO AUTHENTICATION REQUIRED]\n");
             break;
         case 1:
-            printf("GSSAPI]\n");
+            ///printf("GSSAPI]\n");
             break;
         case 2:
-            printf("USERNAME/PASSWORD]\n");
+            ///printf("USERNAME/PASSWORD]\n");
             break;
         case 0xff:
-            printf("NO ACCEPTABLE METHODS]\n");
+            ///printf("NO ACCEPTABLE METHODS]\n");
             break;
         default:
         {
             if (buf[1] >= 3 && buf[1] <= 0x7f)
-                printf("IANA ASSIGNED]\n");
+                ;///printf("IANA ASSIGNED]\n");
             else if (buf[1] >= 0x80 && buf[1] <= 0xfe)
-                printf("RESERVED FOR PRIVATE METHODS]\n");
+                ;///printf("RESERVED FOR PRIVATE METHODS]\n");
             else
-                printf("Unknown]\n");
+                ;///printf("Unknown]\n");
         }
     }
     // Vérifier la réponse
@@ -1967,11 +2156,11 @@ int         net_socks5_connect_host(t_net_connection *con, char *host)
     buf[5 + len] = (con->port >> 8) & 0xFF; // High byte
     buf[6 + len] = con->port & 0xFF;        // Low byte
 
-    printf("Sending request.\n");
-    printf("[%d][%d][%d][%d]\n", buf[0], buf[1], buf[2], buf[3]);
-    printf("Length [%d]\n", buf[4]);
-    debug_string(buf + 5, buf[4]);
-    printf("Port [%d]\n", con->port);
+    ///printf("Sending request.\n");
+    ///printf("[%d][%d][%d][%d]\n", buf[0], buf[1], buf[2], buf[3]);
+    ///printf("Length [%d]\n", buf[4]);
+    ///debug_string(buf + 5, buf[4]);
+    ///printf("Port [%d]\n", con->port);
     // Envoyer la requête de connexion
     if (send(con->sock, buf, 7 + len, 0) < 0)
     {
@@ -1980,7 +2169,7 @@ int         net_socks5_connect_host(t_net_connection *con, char *host)
         return (1);
     }
 
-    printf("Waiting...\n");
+    ///printf("Waiting...\n");
     // Recevoir la réponse du proxy
     if (recv(con->sock, buf, 10, 0) < 0)
     {
@@ -1989,10 +2178,10 @@ int         net_socks5_connect_host(t_net_connection *con, char *host)
         return (1);
     }
 
-    printf("Received.\n");
+    ///printf("Received.\n");
     // Vérifier la réponse
-    printf("Sock5 version : [%d]\n", buf[0]);
-    printf("Response : [%d]\n", buf[1]);
+    ///printf("Sock5 version : [%d]\n", buf[0]);
+    ///printf("Response : [%d]\n", buf[1]);
     if (buf[1] != 0x00) {
         printf("SOCKS5 connection failed\n");
         close(con->sock);
@@ -2000,20 +2189,20 @@ int         net_socks5_connect_host(t_net_connection *con, char *host)
         return (1);
     }
 
-    printf("Address type of following address: ");
+    ///printf("Address type of following address: ");
     switch (buf[3])
     {
         case 1:
-            printf("IPv4\n");
+            ;///printf("IPv4\n");
             break;
         case 2:
-            printf("Domain name\n");
+            ;///printf("Domain name\n");
             break;
         case 3:
-            printf("IPv6\n");
+            ;///printf("IPv6\n");
             break;
         default:
-            printf("Unknown [%d]\n", buf[3]);
+            ;///printf("Unknown [%d]\n", buf[3]);
     }
 
     // Address type
@@ -2043,15 +2232,26 @@ int         net_socks5_connect_host(t_net_connection *con, char *host)
     }
 
     // Print the bound address and port
-    printf("Connected to %s:%u\n", bound_address, bound_port);
+    ///printf("Connected to %s:%u\n", bound_address, bound_port);
     return (0);
 }
 
 int             net_connect(t_net_connection *con)
 {
     int         ret_connect;
-    if (!con || con->connected == 1)
+
+    if (!con || con->connected == 1 || con->sock < 3)
         return (1);
+    // Mettre le socket en mode non-bloquant
+    /// Mettre le socket en mode non-bloquant
+    /*
+    if (0 && fcntl(con->sock, F_SETFL, O_NONBLOCK) < 0)
+    {
+        perror("Échec de fcntl");
+        close(con->sock); // Fermez le socket si fcntl échoue
+        return (1);
+    }
+    */
     #ifdef SSL_ENABLED
     if (con->ssl_enabled)
     {
@@ -2061,6 +2261,8 @@ int             net_connect(t_net_connection *con)
         // Create SSL connection
         if (!(con->ssl = SSL_new(con->ctx)))
             return (1);
+        if (con->hostname)
+            SSL_set_tlsext_host_name(con->ssl, con->hostname);
         SSL_set_fd(con->ssl, con->sock);
     }
     #endif
@@ -2079,7 +2281,7 @@ int             net_connect(t_net_connection *con)
             return (1);
         }
     }
-    else
+    else if (url_is_ipv4(con->ip))
     {
         // connect the client socket to server socket
         if ((ret_connect = connect(con->sock, (struct sockaddr *)&con->server, sizeof(con->server))) != 0)
@@ -2110,10 +2312,57 @@ int             net_connect(t_net_connection *con)
             #endif
             return (1);
         }
+        con->connected = 1;
         FREE(onion);
     }
+    else
+    {
+        con->connected = 1;
+        /*
+        //////////////////////////////////////////////////////////////////////
+        // Utiliser select pour attendre la connexion
+        fd_set fdset;
+        struct timeval tv;
+        FD_ZERO(&fdset);
+        FD_SET(con->sock, &fdset);
+
+        tv.tv_sec = TIMEOUT * 3; // Temps d'attente en secondes
+        tv.tv_usec = 0;      // Temps d'attente en microsecondes
+
+        ret_connect = select(con->sock + 1, NULL, &fdset, NULL, &tv);
+        DEBUG //
+        if (ret_connect > 0) {
+            // Vérifier si la connexion a réussi
+            int so_error;
+            socklen_t len = sizeof(so_error);
+            if ((ret_connect = getsockopt(con->sock, SOL_SOCKET, SO_ERROR, &so_error, &len)) < 0) {
+            ///if (getsockopt(con->sock, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0) {
+                perror("getsockopt");
+                printf("RETCONNECT [%d]\n", ret_connect);
+                return (1); // Erreur lors de la vérification de l'erreur de socket
+            }
+            if (so_error == 0) {
+                printf("Connexion réussie\n");
+                con->connected = 1; // Marquer comme connecté
+                //return (0); // Connexion réussie
+            } else {
+                errno = so_error;
+                printf("Erreur de connexion : %s\n", strerror(so_error));
+                return (1); // Erreur de connexion
+            }
+        } else if (ret_connect == 0) {
+            errno = ETIMEDOUT; // Timeout
+            printf("Timeout lors de la connexion à [%s].\n", con->ip);
+            return (1); // Timeout
+        } else {
+            perror("select");
+            return (1); // Erreur lors de select
+        }
+        */
+    }
+    //////////////////////////////////////////////////////////////////////
     #ifdef SSL_ENABLED
-    if (con->ssl_enabled)
+    if (con->ssl_enabled && con->connected == 1)
     {
         // Establish SSL connection
         if (SSL_connect(con->ssl) <= 0)
@@ -2123,7 +2372,6 @@ int             net_connect(t_net_connection *con)
         }
     }
     #endif // SSL_ENABLED
-    con->connected = 1;
     return (0);
 }
 
@@ -2186,6 +2434,7 @@ int             net_send(t_net_connection *con, char *data, uint *length)
         {
             printf("Erreur lors de l'envoi\n");
             printf("Erreur: %s\n", strerror(errno));
+            printf("CON->SOCK [%d]\n", con->sock); //
             return (1);
         }
         #endif
@@ -2684,7 +2933,7 @@ struct s_http_response         http_new_response(char *http, uint *length)
     // Content
     /// TODO
     /// Batman
-    if (1 && response.content_length != 0)
+    if (0 && response.content_length != 0)
     {
         ///endofstring = string_goto(ptr, '\0');
         endofstring = ptr + response.content_length;
@@ -2726,15 +2975,22 @@ char            *net_recv(t_net_connection *con, uint *length)
     readed.buf = &buff;
     readed.size = 0;
     string = buffer_new(1, 0);
-    printf("Receiving\n");
+    ///printf("Receiving\n");
     #ifdef _WIN32
-    ///while ((rd = recv(con->sock, buff, NET_BUF_SIZE, 0)) > 0)
     while (
+           (con->ssl_enabled == 0
+           && (
            (content_length == -1 && (rd = recv(con->sock, buff, NET_BUF_SIZE)) > 0) ||
            (readed.size < content_length && (rd = recv(con->sock, buff, NET_BUF_SIZE)) > 0)
+               )) ||
+           (con->ssl_enabled == 1
+            && (
+           (content_length == -1 && (rd = SSL_read(con->ssl, buff, NET_BUF_SIZE)) > 0) ||
+           (readed.size < content_length && (rd = SSL_read(con->ssl, buff, NET_BUF_SIZE)) > 0)
+                )
+            )
            )
     #else
-    ///while ((rd = read(con->sock, buff, NET_BUF_SIZE)) > 0)
     while (
            (con->ssl_enabled == 0
            && (
@@ -2757,18 +3013,18 @@ char            *net_recv(t_net_connection *con, uint *length)
             response = http_new_response(buff, &http_length);
             if (response.code != 0)
             {
-                http_display_response(&response); //
+                ///http_display_response(&response); //
                 if ((content_length_string = buffer_param_get_var_buf(&response.header, "Content-Length")))
                     content_length = atoi(content_length_string) + http_length - 64; // BUG -64 ???
             }
             //printf("content-length = %d\n", content_length); //
             http_free_response(&response);
         }
-        printf("> %u", rd);
+        ///printf("> %u", rd);
         readed.size = rd;
-        if (content_length != -1)
-            printf(" (%u/%u)", readed.size, content_length);
-        printf("\n");
+        ///if (content_length != -1)
+        ///    printf(" (%u/%u)", readed.size, content_length);
+        ///printf("\n");
         if (length)
             *length += rd;
         if (buffer_concat(&string, &readed))
@@ -2777,7 +3033,7 @@ char            *net_recv(t_net_connection *con, uint *length)
             return (NULL);
         }
     }
-    printf("\n");
+    ///printf("\n");
     /** // TIMEOUT
     if (rd == -1)
     {
@@ -2792,7 +3048,8 @@ char            *net_recv(t_net_connection *con, uint *length)
 
 char            *net_send_recv(t_net_connection *con, char *data, uint *send_length, uint *recv_length)
 {
-    net_send(con, data, send_length);
+    if (net_send(con, data, send_length))
+        return (NULL);
     return (net_recv(con, recv_length));
 }
 
@@ -2986,7 +3243,7 @@ char     *url_get_route(char *url)
     while (*endofstring && *endofstring != '/')
         endofstring++;
     if (!*endofstring)
-        return (NULL);
+        return (string_strdup("/"));
     url = endofstring;
     while (*endofstring && *endofstring != '#') // Bad request
         endofstring++;
@@ -3062,7 +3319,7 @@ char        *net_resolve_domain(const char *domain, int ipindex)
     WSADATA         wsaData;
     // Initialize Winsock
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        fprintf(stderr, "WSAStartup failed: %d\n", WSAGetLastError());
+        printf("WSAStartup failed: %d\n", WSAGetLastError());
         return (NULL);
     }
     #endif // _WIN32
@@ -3076,7 +3333,7 @@ char        *net_resolve_domain(const char *domain, int ipindex)
 
     // Get the address info
     if ((status = getaddrinfo(domain, NULL, &hints, &res)) != 0) {
-        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(status));
+        printf("getaddrinfo: %s\n", gai_strerror(status));
         return (NULL);
     }
     i = 0;
@@ -3095,7 +3352,7 @@ char        *net_resolve_domain(const char *domain, int ipindex)
         {
             // Convert the IP to a string and print it
             inet_ntop(p->ai_family, addr, ipstr, sizeof ipstr);
-            printf("Resolved IP: %s\n", ipstr);
+            ///printf("Resolved IP: %s\n", ipstr);
             ret = string_strdup(ipstr);
             break;
         }
@@ -3161,12 +3418,12 @@ struct s_net_connection         url_new_connection(char *url, int ipindex)
             FREE(host);
             return (con);
         }
-        con = net_new_connection(ip, url_get_port(url), url_is_https(url));
+        con = net_new_connection(ip, NULL, url_get_port(url), url_is_https(url));
         FREE(ip);
     }
     else if (url_host_is_onion(host))
     {
-        printf("Establishing TOR connection.\n");
+        ///printf("Establishing TOR connection.\n");
         // Onion
         con = net_new_onion_connection(host, url_get_port(url), url_is_https(url));
         FREE(host);
@@ -3178,7 +3435,7 @@ struct s_net_connection         url_new_connection(char *url, int ipindex)
             FREE(host);
             return (con);
         }
-        con = net_new_connection(ip, url_get_port(url), url_is_https(url));
+        con = net_new_connection(ip, host, url_get_port(url), url_is_https(url));
         FREE(ip);
         FREE(host);
     }
@@ -3195,6 +3452,13 @@ void                           http_display_request(t_http_request *request)
     printf("Header:\n");
     buffer_display_param_list(&request->header);
     printf("Content @ %p\n", &request->content);
+}
+
+void            net_free_connection(t_net_connection *con)
+{
+    net_disconnect(con);
+    if (con->hostname)
+        FREE(con->hostname);
 }
 
 char            *http_send_request(t_http_request *request, uint *recv_length)
@@ -3221,32 +3485,32 @@ char            *http_send_request(t_http_request *request, uint *recv_length)
     con = url_new_connection(request->url, ipindex++);
     while (net_connect(&con))
     {
-        net_disconnect(&con);
+        net_free_connection(&con);
         if (ipindex > 10)
             return (NULL);
         con = url_new_connection(request->url, ipindex++);
     }
-    printf("Url [%s]\n", request->url);
+    ///printf("Url [%s]\n", request->url);
     if (!(host = url_get_host(request->url)))
         return (NULL);
-    printf("Host [%s]\n", host);
+    ///printf("Host [%s]\n", host);
     if (!(route = url_get_route(request->url)))
     {
         FREE(host);
         return (NULL);
     }
-    printf("Route [%s]\n", route);
+    ///printf("Route [%s]\n", route);
     http = NULL;
     http = string_stradd(http, request->method);
     http = string_stradd(http, " ");
     http = string_stradd(http, route);
     FREE(route);
     i = -1;
-    printf("Param :\n");
+    ///printf("Param :\n");
     while (++i < request->param.size)
     {
         param = *((t_buf_param **)buffer_get_index(&request->param, i));
-        buffer_display_param(param, 1);
+        ///buffer_display_param(param, 1);
         http = string_stradd(http, param->name);
         http = string_stradd(http, "=");
         http = string_stradd(http, param->data.buf);
@@ -3254,7 +3518,7 @@ char            *http_send_request(t_http_request *request, uint *recv_length)
             http = string_stradd(http, "&");
     }
     http = string_stradd(http, " HTTP/1.1\r\n");
-    printf("Headers :\n");
+    ///printf("Headers :\n");
     if (!url_is_ipv4(request->url) && !buffer_param_get_var_buf_case(&request->header, "Host") && (hostname = url_get_host(request->url)))
     {
         host = string_stradd(NULL, "Host='");
@@ -3281,7 +3545,7 @@ char            *http_send_request(t_http_request *request, uint *recv_length)
     while (++i < request->header.size)
     {
         param = *((t_buf_param **)buffer_get_index(&request->header, i));
-        buffer_display_param(param, 1);
+        ///buffer_display_param(param, 1);
         http = string_stradd(http, param->name);
         http = string_stradd(http, ": ");
         http = string_stradd(http, param->data.buf);
@@ -3290,7 +3554,7 @@ char            *http_send_request(t_http_request *request, uint *recv_length)
     if (strlen(request->content.type) != 0)
     {
         http = string_stradd(http, "\r\n");
-        printf("Content : [%s]\n", request->content.type);
+        ///printf("Content : [%s]\n", request->content.type);
         if (strncmp(request->content.type, "application/x-www-form-urlencoded", strlen("application/x-www-form-urlencoded")) == 0)
         {
             i = -1;
@@ -3326,7 +3590,7 @@ char            *http_send_request(t_http_request *request, uint *recv_length)
     http = string_stradd(http, "\r\n\r\n\r\n");
     ret = net_send_recv(&con, http, NULL, recv_length);
     FREE(http);
-    net_disconnect(&con);
+    net_free_connection(&con);
     return (ret);
 }
 
@@ -3488,7 +3752,8 @@ struct s_http_response      web_get_page(char *url, t_http_request *out)
     }
     response = http_new_response(recv, NULL);
     FREE(recv);
-    if (response.code == 301 || response.code == 302)
+    ///if (response.code == 301 || response.code == 302)
+    if (response.code >= 300 && response.code < 400)
     {
         char *full_url;
         char *location_url;
@@ -3745,7 +4010,10 @@ char            *http_response_export_xml(t_http_response *response)
         xml = string_stradd(xml, "/>");
     }
     xml = string_stradd(xml, "<content>");
-    xml = string_stradd_len(xml, response->buf, response->content_length);
+    if (response->content_length)
+        xml = string_stradd_len(xml, response->buf, response->content_length);
+    else
+        xml = string_stradd(xml, response->buf);
     xml = string_stradd(xml, "</content>");
     xml = string_stradd(xml, "</response>");
     return (xml);
@@ -3980,6 +4248,8 @@ void            web_display_node(t_web_node *node)
         return ;
     printf("Parent @ (%p)\n", node->parent);
     printf("URL [%s]\n", node->request.url);
+    if (node->host)
+        printf("\tHOST (%p)\n", node->host);
     printf("Child count #%u\n", node->child.size);
     i = -1;
     while (++i < node->child.size)
@@ -4580,6 +4850,7 @@ void            web_shell_display_help(void)
     printf("exit : Return to parent node\n");
     printf("return : Return to parent node\n");
     printf("quit : Exit shell\n");
+    printf("web_get_page : Add new nodes\n");
     printf("info : Node informations\n");
     printf("request : Display request\n");
     printf("response : Display reponse\n");
@@ -4594,7 +4865,6 @@ void            web_shell_display_help(void)
     printf("texttag : Display text that match with a tagname\n");
     printf("htmldisplay : Display the HTML structure\n");
     printf("getword : Display words\n");
-    printf("web_get_page : Add new nodes\n");
     printf("links : Display page links\n");
     printf("expand : Download all sublinks of node\n");
     printf("expandsamesite : Download all sublinks of same host of node\n");
@@ -4602,6 +4872,8 @@ void            web_shell_display_help(void)
     printf("expandallsamesite : Download recursively all sublinks of not the same host of node\n");
     printf("expandallnotsamesite : Download recursively all sublinks of not the same host of node\n");
     printf("mail : Display all mails of node tree\n");
+    printf("form : Display forms\n");
+    printf("forminput : Display form input\n");
     printf("host : Host shell\n");
     printf("----------------\n");
 }
@@ -4665,12 +4937,14 @@ int             buffer_contain_string(t_buf *strbuf, char *string)
     uint        i;
     char        *str;
 
-    if (!strbuf)
+    if (!strbuf || !string)
         return (-1);
     i = -1;
     while (++i < strbuf->size)
     {
         str = *((char **)buffer_get_index(strbuf, i));
+        if (!str)
+            continue;
         if (strncmp(str, string, strlen(string)) == 0)
             return (i);
     }
@@ -4870,8 +5144,9 @@ int             web_shell_command_getword(char *input, t_web_node *node)
 }
 
 typedef struct {
-    t_web_node *node;
-    t_html_node *tag;
+    t_web_node  *node;
+    ///t_html_node *tag; ///
+    char        *url;
 } thread_data_t;
 
 typedef struct {
@@ -4882,120 +5157,59 @@ typedef struct {
     pthread_cond_t cond;
 } thread_pool_t;
 
-void *process_tag(void *arg) {
+void *process_tag(void *arg)
+{
     thread_pool_t *pool = (thread_pool_t *)arg;
-    while (1) {
-        pthread_mutex_lock(&pool->mutex);
+    pthread_mutex_lock(&pool->mutex);
 
-        // Attendre qu'il y ait des tâches à traiter
-        while (pool->task_index >= pool->task_count) {
-            pthread_cond_wait(&pool->cond, &pool->mutex);
-        }
-
-        // Récupérer la tâche
-        thread_data_t data = pool->tasks[pool->task_index];
-        pool->task_index++;
-        pthread_mutex_unlock(&pool->mutex);
-
-        // Vérification des pointeurs
-        if (!data.node || !data.tag) {
-            fprintf(stderr, "Invalid node or tag\n");
-            continue; // Passer à la prochaine itération
-        }
-
-        t_web_node *node = data.node;
-        t_html_node *tag = data.tag;
-        char *full_url;
-        t_buf_param *param;
-        uint j;
-
-        for (j = 0; j < tag->param.size; j++) {
-            param = buffer_get_index(&tag->param, j);
-            if (!param) {
-                fprintf(stderr, "Invalid parameter at index %u\n", j);
-                continue; // Passer à la prochaine itération
-            }
-
-            if (strncasecmp(param->name, "href", STRING_SIZE) == 0) {
-                if (param->data.buf && *((char *)param->data.buf) == '#')
-                    continue;
-                if (strncasecmp(param->data.buf, "mailto:", strlen("mailto:")) == 0)
-                    continue;
-                full_url = url_get_full(node->request.url, param->data.buf);
-                if (!full_url) {
-                    fprintf(stderr, "Failed to get full URL\n");
-                    continue; // Passer à la prochaine itération
-                }
-                if (web_url_exists(web_root_node(node), full_url) ||
-                    web_url_exists(node, full_url)) {
-                    FREE(full_url);
-                    continue;
-                }
-                t_web_node *child = web_new_node_nochild(full_url, node);
-                if (child) {
-                    pthread_mutex_lock(&node->mutex);
-                    buffer_push(&node->child, &child);
-                    pthread_mutex_unlock(&node->mutex);
-                }
-                FREE(full_url);
-            }
-        }
+    // Attendre qu'il y ait des tâches à traiter
+    while (pool->task_index >= pool->task_count) {
+        pthread_cond_wait(&pool->cond, &pool->mutex);
     }
-    return NULL;
-}
 
-void *process_tag_OLD(void *arg) {
-    thread_pool_t *pool = (thread_pool_t *)arg;
-    while (1) {
-        pthread_mutex_lock(&pool->mutex);
+    // Récupérer la tâche
+    thread_data_t data = pool->tasks[pool->task_index];
+    pool->task_index++;
+    pthread_mutex_unlock(&pool->mutex);
 
-        // Attendre qu'il y ait des tâches à traiter
-        while (pool->task_index >= pool->task_count) {
-            pthread_cond_wait(&pool->cond, &pool->mutex);
-        }
-
-        // Récupérer la tâche
-        thread_data_t data = pool->tasks[pool->task_index];
-        pool->task_index++;
-        pthread_mutex_unlock(&pool->mutex);
-
-        // Traiter la balise
-        t_web_node *node = data.node;
-        t_html_node *tag = data.tag;
-        char *full_url;
-        t_buf_param *param;
-        uint j;
-
-        for (j = 0; j < tag->param.size; j++) {
-            param = buffer_get_index(&tag->param, j);
-            if (strncasecmp(param->name, "href", STRING_SIZE) == 0) {
-                if (param->data.buf && *((char *)param->data.buf) == '#')
-                    continue;
-                if (strncasecmp(param->data.buf, "mailto:", strlen("mailto:")) == 0)
-                    continue;
-                full_url = url_get_full(node->request.url, param->data.buf);
-                if (web_url_exists(web_root_node(node), full_url) ||
-                    web_url_exists(node, full_url)) {
-                    FREE(full_url);
-                    continue;
-                }
-                t_web_node *child = web_new_node_nochild(full_url, node);
-                if (child) {
-                    pthread_mutex_lock(&node->mutex);
-                    buffer_push(&node->child, &child);
-                    pthread_mutex_unlock(&node->mutex);
-                }
-                FREE(full_url);
-            }
-        }
+    // Vérification des pointeurs
+    if (!data.node || !data.url) {
+        printf("Invalid node or tag\n");
+        return (NULL);
     }
-    return NULL;
+
+    t_web_node  *node = data.node;
+    //t_html_node *tag = data.tag;
+    char        *url = data.url;
+    char        *full_url;
+
+    if (url && *((char *)url) == '#')
+        return (NULL);
+    if (strncasecmp(url, "mailto:", strlen("mailto:")) == 0)
+        return (NULL);
+    full_url = url_get_full(node->request.url, url);
+    if (!full_url) {
+        printf("Failed to get full URL\n");
+        return (NULL);
+    }
+    if (web_url_exists(web_root_node(node), full_url) ||
+        web_url_exists(node, full_url)) {
+        FREE(full_url);
+        return (NULL);
+    }
+    t_web_node *child = web_new_node_nochild(full_url, node);
+    if (child) {
+        pthread_mutex_lock(&node->mutex);
+        buffer_push(&node->child, &child);
+        pthread_mutex_unlock(&node->mutex);
+    }
+    FREE(full_url);
+    return (NULL);
 }
 
 int web_shell_command_expand(char *input, t_web_node *node) {
     struct s_buf list;
     t_html_node *tag;
-    pthread_t threads[THREAD_COUNT];
     thread_pool_t pool;
 
     // Vérification des entrées
@@ -5003,24 +5217,67 @@ int web_shell_command_expand(char *input, t_web_node *node) {
         return (1);
 
     list = html_find_tag(&node->html, "a");
-    size_t num_tags = list.size;
+    /// TODO FILTER UNIQUE
+
+
+    /////////////////////////////////////////////////////
+    t_buf_param         *param;
+    char                *full_url;
+    struct s_buf        printed;
+    uint                i;
+    uint                j;
+
+    printed = buffer_new(sizeof(char *), 0);
+    i = -1;
+    while (++i < list.size)
+    {
+        tag = *((t_html_node **)buffer_get_index(&list, i));
+        j = -1;
+        while (++j < tag->param.size)
+        {
+            param = buffer_get_index(&tag->param, j);
+            if (strncasecmp(param->name, "href", STRING_SIZE) == 0)
+            {
+                if (param->data.buf && *((char *)param->data.buf) == '#')
+                    continue;
+                full_url = url_get_full(node->request.url, param->data.buf);
+                if (buffer_contain_string(&printed, full_url) != -1)
+                {
+                    FREE(full_url);
+                    continue;
+                }
+                buffer_push(&printed, &full_url);
+            }
+        }
+    }
+    buffer_free(&list);
+    /////////////////////////////////////////////////////
+
+    size_t num_tags = printed.size;
 
     // Initialiser le pool de threads
+    pthread_t *threads;
+    if (!(threads = ALLOC(sizeof(pthread_t) * num_tags)))
+    {
+        buffer_free_string(&printed);
+        return (1);
+    }
     pool.tasks = malloc(num_tags * sizeof(thread_data_t));
     pool.task_count = num_tags;
     pool.task_index = 0;
     pthread_mutex_init(&pool.mutex, NULL);
     pthread_cond_init(&pool.cond, NULL);
 
+    char *url; //bugshit
     // Remplir le pool de tâches
     for (size_t i = 0; i < num_tags; i++) {
-        tag = *((t_html_node **)buffer_get_index(&list, i));
+        url = *((char **)buffer_get_index(&printed, i));
         pool.tasks[i].node = node;
-        pool.tasks[i].tag = tag;
+        pool.tasks[i].url = url;
     }
 
     // Créer les threads
-    for (int i = 0; i < THREAD_COUNT; i++) {
+    for (int i = 0; i < num_tags; i++) {
         pthread_create(&threads[i], NULL, process_tag, &pool);
     }
 
@@ -5031,17 +5288,18 @@ int web_shell_command_expand(char *input, t_web_node *node) {
     pthread_mutex_unlock(&pool.mutex);
 
     // Attendre que tous les threads se terminent
-    for (int i = 0; i < THREAD_COUNT; i++) {
+    for (int i = 0; i < num_tags; i++) {
         pthread_join(threads[i], NULL);
     }
+    DEBUG //
 
     // Libération des ressources
     free(pool.tasks);
     pthread_mutex_destroy(&pool.mutex);
     pthread_cond_destroy(&pool.cond);
-    buffer_free(&list);
-
-    return 0;
+    buffer_free_string(&printed);
+    FREE(threads);
+    return (0);
 }
 
 int             web_shell_command_expand_singlethread(char *input, t_web_node *node)
@@ -5384,8 +5642,10 @@ int             web_shell_command_export(char *input, t_web_node *node)
     char        *filename;
     char        *ptr;
 
+    DEBUG //
     if (!node || !input || !(xml = web_export_xml(node)))
         return (1);
+    DEBUG //
     if (!(ptr = string_goto_multiple(string_goto(input, ' '), "'\"abcdefghijklmnopqrstuvwxyz")))
     {
         printf("%s\n", xml);
@@ -5503,14 +5763,18 @@ int             web_shell_command_import(char *input, t_web_node *node)
     return (0);
 }
 
-int             web_shell_command_web_get_page(char *input, t_web_node *node)
+int             web_shell_command_web_get_page(char *input, t_web_node **rootnode)
 {
     char        *url;
     char        *ptr;
     char        *endofstring;
     t_web_node  *child;
+    t_web_node  *node;
 
-    if (!node || !input)
+    if (!rootnode)
+        return (1);
+    node = *rootnode;
+    if (!input)
         return (1);
     if (!(ptr = string_goto_multiple(string_goto(input, ' '), "'\"abcdefghijklmnopqrstuvwxyz")))
     {
@@ -5540,7 +5804,9 @@ int             web_shell_command_web_get_page(char *input, t_web_node *node)
     {
         if ((child = web_new_node(url, node, atoi(ptr))))
         {
-            if (buffer_push(&node->child, &child))
+            if (!node)
+                *rootnode = child;
+            else if (buffer_push(&node->child, &child))
                 printf("Error pushing new child.\n");
         }
     }
@@ -5588,6 +5854,7 @@ int             web_shell_command_links(char *input, t_web_node *node)
         }
     }
     printf("Total links: %u\n", printed.size);
+    buffer_free(&list);
     buffer_free_string(&printed);
     return (0);
 }
@@ -6586,6 +6853,155 @@ int             web_shell_host(t_web_host *host)
     return (0);
 }
 
+t_web_host          *web_find_host(t_web_node *node, char *domain)
+{
+    uint            i;
+    char            *nodedomain;
+    t_web_node      *child;
+    t_web_host      *ret;
+
+    if (!node || !domain)
+        return (NULL);
+    if ((nodedomain = url_get_domain(node->request.url)))
+    {
+        if (strncasecmp(nodedomain, domain, strlen(domain)) == 0)
+            if (node->host)
+                return (node->host);
+        FREE(nodedomain);
+    }
+    i = -1;
+    while (++i < node->child.size)
+    {
+        child = *((t_web_node **)buffer_get_index(&node->child, i));
+        if (!child)
+            continue;
+        if ((ret = web_find_host(child, domain)))
+            return (ret);
+    }
+    return (NULL);
+}
+
+int             web_shell_command_host(char *input, t_web_node *node)
+{
+    t_web_host *host;
+
+    if (!node || !input)
+        return (0);
+    if (node->host)
+    {
+        if (web_shell_host(node->host))
+        {
+            if (!node->parent)
+                web_shell_command_export("export default.xml", node);
+            return (1);
+        }
+    }
+    else
+    {
+        char *domain;
+        domain = url_get_domain(node->request.url);
+        if ((host = web_find_host(web_root_node(node), domain)))
+        {
+            if (web_shell_host(host))
+            {
+                if (!node->parent)
+                    web_shell_command_export("export default.xml", node);
+                return (1);
+            }
+        }
+        else if ((host = web_new_host(node)))
+        {
+            node->host = host;
+            if (web_shell_host(host))
+            {
+                if (!node->parent)
+                    web_shell_command_export("export default.xml", node);
+                return (1);
+            }
+        }
+        if (domain)
+            FREE(domain);
+    }
+    return (0);
+}
+
+int             web_shell_command_texttag(char *input, t_web_node *node)
+{
+    char                *text;
+    char                *tagname;
+
+    if (!input || !node)
+        return (0);
+    tagname = input;
+    while (*tagname && *tagname != ' ')
+        tagname++;
+    tagname = string_skipblank(tagname);
+    if ((text = html_get_text_tag(&node->html, tagname)))
+    {
+        printf("%s\n", text);
+        FREE(text);
+    }
+    return (0);
+}
+
+int             web_shell_command_form(char *input, t_web_node *node)
+{
+    uint        i;
+
+    if (!input || !node)
+        return (0);
+    struct s_buf    array;
+    array = html_find_tag(&node->html, "form");
+    i = -1;
+    while (++i < array.size)
+    {
+        t_html_node     *node;
+
+        node = *((t_html_node **)buffer_get_index(&array, i));
+        if (!node)
+            continue;
+        html_display_node(node, 0);
+        printf("-------------------------------\n");
+    }
+    printf("Total forms: %u\n", array.size);
+    buffer_free(&array);
+}
+
+int             web_shell_command_forminput(char *input, t_web_node *node)
+{
+    uint        i;
+    uint        j;
+
+    if (!input || !node)
+        return (0);
+    struct s_buf    array;
+    array = html_find_tag(&node->html, "form");
+    i = -1;
+    while (++i < array.size)
+    {
+        t_html_node     *node;
+
+        node = *((t_html_node **)buffer_get_index(&array, i));
+        if (!node)
+            continue;
+        html_display_node_max(node, 0, 1);
+        struct s_buf    input;
+        input = html_find_tag(node, "input");
+        j = -1;
+        while (++j < input.size)
+        {
+            node = *((t_html_node **)buffer_get_index(&input, j));
+            if (!node)
+                continue;
+            html_display_node(node, 1);
+        }
+        buffer_free(&input);
+        printf("-------------------------------\n");
+    }
+    printf("Total forms: %u\n", array.size);
+    buffer_free(&array);
+}
+
 int             web_shell(t_web_node *node)
 {
     char            input[STRING_SIZE * 16]; // Pointeur pour la chaîne de caractères
@@ -6596,31 +7012,95 @@ int             web_shell(t_web_node *node)
     uint            i;
 
     struct s_html_node  html;
-    char                *text;
-    char                *tagname;
 
-    if (!node)
-        return (0);
+    fd_set readfds;
+    struct timeval timeout;
+
     memset(input, 0, STRING_SIZE * 16);
     input[0] = 'a';
+    web_shell_display_prompt(node, 8);
+    printf(">");
     while (strncmp(input, "exit", strlen("exit")) != 0 && strncmp(input, "return", strlen("return")) != 0)
     {
-        web_shell_display_prompt(node, 8);
-        printf(">");
+        //fflush(stdout); // S'assurer que l'invite est affichée immédiatement
         if (fgets(input, sizeof(input), stdin) != NULL)
         {
             len = strlen(input);
             if (len > 0 && input[len - 1] == '\n')
                 input[len - 1] = '\0';
         }
+        ///////////////////////////////////////////////////////////////
+        /*
+        fflush(stdout); // S'assurer que l'invite est affichée immédiatement
+
+        // Initialiser le set de descripteurs
+        FD_ZERO(&readfds);
+        FD_SET(STDIN_FILENO, &readfds);
+
+        // Définir le timeout (par exemple, 5 secondes)
+        timeout.tv_sec = 5;
+        timeout.tv_usec = 0;
+
+        // Attendre que l'entrée soit prête
+        int activity = select(STDIN_FILENO + 1, &readfds, NULL, NULL, &timeout);
+
+        if (activity < 0) {
+            perror("select error");
+            printf("STDIN_FILENO %d\n", STDIN_FILENO);//
+            if (STDIN_FILENO < 0)
+                perror("STDIN_FILENO est invalide");
+            DEBUG //
+            char test[10];
+            if (read(STDIN_FILENO, test, sizeof(test)) < 0) {
+                perror("Erreur de lecture sur stdin");
+            } else {
+                printf("Lecture réussie sur stdin\n");
+            }
+            DEBUG //
+            return (0);
+            //exit(EXIT_FAILURE);
+        } else if (activity == 0) {
+            continue;
+        } else {
+            // L'entrée est prête à être lue
+            if (FD_ISSET(STDIN_FILENO, &readfds)) {
+                if (fgets(input, sizeof(input), stdin) != NULL) {
+                    // Supprimer le caractère de nouvelle ligne
+                    input[strcspn(input, "\n")] = '\0'; // Remplacer le '\n' par '\0'
+                    ///printf("Vous avez saisi : %s\n", input);
+                }
+            }
+        }
+        */
+        ///////////////////////////////////////////////////////////////
+        /*
         else
+        {
+            DEBUG //
+            if (node && !node->parent)
+            {
+                DEBUG //
+                web_shell_command_export("export default.xml", node);
+            }
+            DEBUG //
             return (1);
+        }*/
         if (strlen(input) == 0)
             continue;
         if (strncmp(input, "quit", strlen("quit")) == 0)
+        {
+            if (!node && node->parent)
+            {
+                web_shell_command_export("export default.xml", node);
+            }
             return (1);
+        }
         if (strncmp(input, "help", strlen("help")) == 0)
             web_shell_display_help();
+        if (strncmp(input, "web_get_page", strlen("web_get_page")) == 0)
+            web_shell_command_web_get_page(input, &node);
+        if (!node)
+            continue;
         if (strncmp(input, "info", strlen("info")) == 0)
             web_display_node(node);
         if (strncmp(input, "request", strlen("request")) == 0)
@@ -6640,7 +7120,13 @@ int             web_shell(t_web_node *node)
         }
         if (strncmp(input, "goto", strlen("goto")) == 0)
             if (web_shell_command_goto(input, node))
+            {
+                if (node && !node->parent)
+                {
+                    web_shell_command_export("export default.xml", node);
+                }
                 return (1);
+            }
         if (strncmp(input, "getword", strlen("getword")) == 0)
             web_shell_command_getword(input, node);
         if (strncmp(input, "texts", len) == 0)
@@ -6648,21 +7134,9 @@ int             web_shell(t_web_node *node)
         if (strncmp(input, "comments", len) == 0)
             web_shell_command_comments(input, node);
         if (strncmp(input, "texttag", strlen("texttag")) == 0)
-        {
-            tagname = input;
-            while (*tagname && *tagname != ' ')
-                tagname++;
-            tagname = string_skipblank(tagname);
-            if ((text = html_get_text_tag(&node->html, tagname)))
-            {
-                printf("%s\n", text);
-                FREE(text);
-            }
-        }
+            web_shell_command_texttag(input, node);
         if (strncmp(input, "htmldisplay", strlen("htmldisplay")) == 0)
             html_display_node(&node->html, 0);
-        if (strncmp(input, "web_get_page", strlen("web_get_page")) == 0)
-            web_shell_command_web_get_page(input, node);
         if (strncmp(input, "export", strlen("export")) == 0)
             web_shell_command_export(input, node);
         if (strncmp(input, "save", strlen("save")) == 0)
@@ -6673,6 +7147,7 @@ int             web_shell(t_web_node *node)
             web_shell_command_links(input, node);
         if (strncmp(input, "expand", strlen(input)) == 0)
             web_shell_command_expand(input, node);
+            ///web_shell_command_expand_singlethread(input, node);
         if (strncmp(input, "expandsamesite", strlen("expandsamesite")) == 0)
             web_shell_command_expand_samesite(input, node);
         if (strncmp(input, "expandnotsamesite", strlen("expandnotsamesite")) == 0)
@@ -6684,29 +7159,19 @@ int             web_shell(t_web_node *node)
         if (strncmp(input, "mail", strlen("mail")) == 0)
             web_shell_command_mail(input, node);
         if (strncmp(input, "host", strlen("host")) == 0)
-        {
-            t_web_host *host;
-
-            if (node->host)
-            {
-                if (web_shell_host(node->host))
-                    return (1);
-            }
-            else
-            {
-                if ((host = web_new_host(node)))
-                {
-                    node->host = host;
-                    if (web_shell_host(host))
-                        return (1);
-                }
-            }
-        }
+            if (web_shell_command_host(input, node))
+                return (1);
+        if (strncmp(input, "forminput", strlen("forminput")) == 0)
+            web_shell_command_forminput(input, node);
+        else if (strncmp(input, "form", strlen("form")) == 0)
+            web_shell_command_form(input, node);
         if (strncmp(input, "content", STRING_SIZE) == 0)
         {
             if (node->response.buf)
                 printf("%s\n", node->response.buf);
         }
+        web_shell_display_prompt(node, 8);
+        printf(">");
     }
     return (0);
 }
@@ -7053,76 +7518,23 @@ int         test_ipv6(void)
 
 int main(int ac, char **av)
 {
-    int sock;
-    struct sockaddr_in server_addr;
-    SSL_CTX *ctx;
-    SSL *ssl;
+    t_web_node  *node;
 
-    init_openssl();
-    ctx = create_context();
-    configure_context(ctx);
-
-    // Créer un socket
-    sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
-        perror("Unable to create socket");
-        exit(EXIT_FAILURE);
-    }
-
-    // Configurer l'adresse du serveur
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(443);
-    inet_pton(AF_INET, "142.250.178.132", &server_addr.sin_addr); // Remplacez par l'adresse IP du serveur
-
-    // Établir la connexion
-    if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        perror("Connection failed");
-        close(sock);
-        exit(EXIT_FAILURE);
-    }
-
-    // Créer un objet SSL
-    ssl = SSL_new(ctx);
-    SSL_set_fd(ssl, sock);
-
-    // Établir la connexion SSL
-    if (SSL_connect(ssl) <= 0) {
-        ERR_print_errors_fp(stderr);
-    } else {
-        printf("SSL connection established\n");
-    }
-
-    // Ici, vous pouvez envoyer et recevoir des données via SSL
-
-    // Fermer la connexion SSL et le socket
-    SSL_shutdown(ssl);
-    SSL_free(ssl);
-    close(sock);
-    SSL_CTX_free(ctx);
-    cleanup_openssl();
 
     if (1)
     {
-        t_web_node  *node;
-
-        //node = web_new_node("http://www.bbcnewsd73hkzno2ini43t4gblxvycyac5aw4gnv7t2rccijh7745uqd.onion/", NULL, 1);
-        if (ac != 2)
-            node = web_new_node("http://hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion/", NULL, 1);
-            //node = web_new_node("http://www.allorank.com/", NULL, 1);
-        else
+        if (ac == 2)
+        {
             node = web_new_node(av[1], NULL, 1);
-        ///t_web_host *host;
-
-        ///host = web_new_host(node);
-        ///web_shell_host(host);
-
-        //web_free_host(host);
-        //FREE(host);
-        ///web_free_node(node); // Crash
-        //FREE(node);
-        //DEBUG
-        web_shell(node);
+            web_shell_command_import("import default.xml", node);
+            //node = web_new_node("http://hellhoh5o35sylxrpfu45p5r74n2lzvirnvszmziuvn7bcejlynaqxyd.onion/", NULL, 1);
+            //node = web_new_node("http://www.allorank.com/", NULL, 1);
+            web_shell(node);
+        }
+        else
+        {
+            web_shell(NULL);
+        }
     }
     return (0);
 }
