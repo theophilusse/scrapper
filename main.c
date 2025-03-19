@@ -210,6 +210,30 @@ void            *buffer_get_index(t_buf *buf, uint index)
     return (buf->buf + index * buf->blocksize);
 }
 
+void            buffer_delete_index(t_buf *buf, uint index)
+{
+    void        *cpy;
+
+    if (!buf || index < 0 || index >= buf->size)
+        return ;
+    if (buf->size == 1)
+    {
+        buf->size = 0;
+        FREE(buf->buf);
+        buf->buf = NULL;
+        return ;
+    }
+    if (!(cpy = ALLOC(buf->blocksize * (buf->size - 1))))
+        return ;
+    if (index > 0)
+        memcpy(cpy, buf->buf, buf->blocksize * index);
+    if (index + 1 < buf->size)
+        memcpy(cpy + buf->blocksize * index, buf->buf + buf->blocksize * (index + 1), buf->blocksize * (buf->size - (index + 1)));
+    FREE(buf->buf);
+    buf->buf = cpy;
+    buf->size--;
+}
+
 static void        print_tab(uint tab)
 {
     while (tab--)
@@ -663,9 +687,12 @@ char            *string_strdup(const char *str)
     uint        size;
     char        *dup;
 
+    if (!str)
+        return (NULL);
     size = strlen(str) + 1;
     if (!(dup = ALLOC(size)))
         return (NULL);
+    dup[size - 1] = '\0';
     memcpy(dup, str, size);
     return (dup);
 }
@@ -777,10 +804,28 @@ t_html_node         *html_new_node_string(char *string, t_html_node *parent)
     return (node);
 }
 
-int                 html_is_inline(char *tag, char *trail)
+int                 html_is_inline(char *parent_tag, char *tag, char *trail)
 {
     if (*(trail - 2) == '/') // Test TODO
         return (1);
+    if (strncasecmp(tag, "meta", strlen(tag)) == 0)
+        return (1);
+    if (strncasecmp(tag, "li", strlen(tag)) == 0)
+        return (0);
+    if (strncasecmp(tag, "ul", strlen(tag)) == 0)
+        return (0);
+    if (strncasecmp(tag, "ol", strlen(tag)) == 0)
+        return (0);
+    if (strncasecmp(tag, "link", strlen(tag)) == 0)
+        return (1);
+    if (strncasecmp(tag, "input", strlen(tag)) == 0)
+        return (1);
+    if (strncasecmp(tag, "br", strlen(tag)) == 0)
+        return (1);
+    if (strncasecmp(tag, "source", strlen(tag)) == 0)
+        return (1);
+    if (strncasecmp(tag, "html", strlen(tag)) == 0)
+        return (0);
     while (*trail)
     {
         if (*trail == '<')
@@ -790,9 +835,14 @@ int                 html_is_inline(char *tag, char *trail)
                 trail += 2;
                 if (strncasecmp(tag, trail, strlen(tag)) == 0)
                     return (0);
+                if (parent_tag)
+                {
+                    if (strncasecmp(parent_tag, trail, strlen(tag)) == 0)
+                        return (1);
+                }
+                //else if (strncasecmp("web", trail, strlen(tag)) == 0)
+                //    return (1);
             }
-            /// else /// TODO
-            /// Need more sophisticated function
         }
         trail++;
     }
@@ -923,6 +973,8 @@ t_html_node         *html_new_node(char *tag, t_html_node *parent, char **end)
         endofstring = string_goto_endtag(parent->tag, trail);
         node->text = string_duplicate(trail, endofstring - trail);
         trail = string_goto(endofstring + strlen(parent->tag) + 2, '>');
+        if (!trail)
+            return (html_free_node(node));
         if (*trail)
             trail++;
         if (end)
@@ -965,7 +1017,9 @@ t_html_node         *html_new_node(char *tag, t_html_node *parent, char **end)
         endofstring++;
         if (is_blank(*(endofstring - 1)))
             endofstring--;
-        node->text = string_duplicate(trail, endofstring - trail);
+        // bugshit
+        if (endofstring > trail && endofstring - trail != 0)
+            node->text = string_duplicate(trail, endofstring - trail);
         if (end)
             *end = string_goto_str(trail, "-->") + 4;
         return (node);
@@ -995,8 +1049,13 @@ t_html_node         *html_new_node(char *tag, t_html_node *parent, char **end)
         }
         trail++;
     }
+    if (!trail)
+        return (html_free_node(node)); /// TEST DEBUG
     trail++; // Inner
-    node->is_inline = html_is_inline(node->tag, trail);
+    if (node->parent)
+        node->is_inline = html_is_inline(node->parent->tag, node->tag, trail);
+    else
+        node->is_inline = html_is_inline(NULL, node->tag, trail);
     if (!node->is_inline
         //&& strncasecmp(node->tag, "style", STRING_SIZE) != 0
         )
@@ -2949,6 +3008,7 @@ struct s_http_response         http_new_response(char *http, uint *length)
     else
     {
         response.content_length = strlen(ptr);
+        printf("CONTENT LENGTH : %u\n", response.content_length); ///
         response.buf = string_strdup(ptr);
     }
     FREE(res);
@@ -4688,7 +4748,7 @@ t_web_node          *web_import_xml(char *xml)
     printf("XML to Web node\n");
     web = web_import_xml_node(root, NULL);
     // Tarzan
-    ///html_free_node(root); // Crash Leak
+    ///html_free_node(root); // Crash LEAK
     return (web);
 }
 
@@ -4859,11 +4919,12 @@ void            web_shell_display_help(void)
     printf("export : Export to XML\n");
     printf("import : Import XML web node\n");
     printf("save : Export everything to XML\n");
-    printf("content : View node content\n");
+    printf("content : View raw node content\n");
     printf("texts : Display all text\n");
     printf("comments : Display all HTML comments\n");
     printf("texttag : Display text that match with a tagname\n");
     printf("htmldisplay : Display the HTML structure\n");
+    printf("nodedisplay : Display the HTML node structure\n");
     printf("getword : Display words\n");
     printf("links : Display page links\n");
     printf("expand : Download all sublinks of node\n");
@@ -5291,7 +5352,6 @@ int web_shell_command_expand(char *input, t_web_node *node) {
     for (int i = 0; i < num_tags; i++) {
         pthread_join(threads[i], NULL);
     }
-    DEBUG //
 
     // Libération des ressources
     free(pool.tasks);
@@ -5373,7 +5433,204 @@ int             url_same_host(char *urla, char *urlb)
     return (0);
 }
 
+void *process_tag_samesite(void *arg)
+{
+    thread_pool_t *pool = (thread_pool_t *)arg;
+    pthread_mutex_lock(&pool->mutex);
+
+    // Attendre qu'il y ait des tâches à traiter
+    while (pool->task_index >= pool->task_count) {
+        pthread_cond_wait(&pool->cond, &pool->mutex);
+    }
+
+    // Récupérer la tâche
+    thread_data_t data = pool->tasks[pool->task_index];
+    pool->task_index++;
+    pthread_mutex_unlock(&pool->mutex);
+
+    // Vérification des pointeurs
+    if (!data.node || !data.url) {
+        printf("Invalid node or tag\n");
+        return (NULL);
+    }
+
+    t_web_node  *node = data.node;
+    //t_html_node *tag = data.tag;
+    char        *url = data.url;
+    char        *full_url;
+
+    if (url && *((char *)url) == '#')
+        return (NULL);
+    if (strncasecmp(url, "mailto:", strlen("mailto:")) == 0)
+        return (NULL);
+    full_url = url_get_full(node->request.url, url);
+    if (!full_url) {
+        printf("Failed to get full URL\n");
+        return (NULL);
+    }
+    if (!url_same_host(node->request.url, full_url) ||
+        web_url_exists(web_root_node(node), full_url) ||
+        web_url_exists(node, full_url)) {
+        FREE(full_url);
+        return (NULL);
+    }
+    t_web_node *child = web_new_node_nochild(full_url, node);
+    if (child) {
+        pthread_mutex_lock(&node->mutex);
+        buffer_push(&node->child, &child);
+        pthread_mutex_unlock(&node->mutex);
+    }
+    FREE(full_url);
+    return (NULL);
+}
+
+void *process_tag_notsamesite(void *arg)
+{
+    thread_pool_t *pool = (thread_pool_t *)arg;
+    pthread_mutex_lock(&pool->mutex);
+
+    // Attendre qu'il y ait des tâches à traiter
+    while (pool->task_index >= pool->task_count) {
+        pthread_cond_wait(&pool->cond, &pool->mutex);
+    }
+
+    // Récupérer la tâche
+    thread_data_t data = pool->tasks[pool->task_index];
+    pool->task_index++;
+    pthread_mutex_unlock(&pool->mutex);
+
+    // Vérification des pointeurs
+    if (!data.node || !data.url) {
+        printf("Invalid node or tag\n");
+        return (NULL);
+    }
+
+    t_web_node  *node = data.node;
+    //t_html_node *tag = data.tag;
+    char        *url = data.url;
+    char        *full_url;
+
+    if (url && *((char *)url) == '#')
+        return (NULL);
+    if (strncasecmp(url, "mailto:", strlen("mailto:")) == 0)
+        return (NULL);
+    full_url = url_get_full(node->request.url, url);
+    if (!full_url) {
+        printf("Failed to get full URL\n");
+        return (NULL);
+    }
+    if (!url_same_host(node->request.url, full_url) ||
+        web_url_exists(web_root_node(node), full_url) ||
+        web_url_exists(node, full_url)) {
+        FREE(full_url);
+        return (NULL);
+    }
+    t_web_node *child = web_new_node_nochild(full_url, node);
+    if (child) {
+        pthread_mutex_lock(&node->mutex);
+        buffer_push(&node->child, &child);
+        pthread_mutex_unlock(&node->mutex);
+    }
+    FREE(full_url);
+    return (NULL);
+}
+
 int             web_shell_command_expand_samesite(char *input, t_web_node *node)
+{
+    struct s_buf list;
+    t_html_node *tag;
+    thread_pool_t pool;
+
+    // Vérification des entrées
+    if (!node || !input)
+        return (1);
+
+    list = html_find_tag(&node->html, "a");
+    /// TODO FILTER UNIQUE
+
+
+    /////////////////////////////////////////////////////
+    t_buf_param         *param;
+    char                *full_url;
+    struct s_buf        printed;
+    uint                i;
+    uint                j;
+
+    printed = buffer_new(sizeof(char *), 0);
+    i = -1;
+    while (++i < list.size)
+    {
+        tag = *((t_html_node **)buffer_get_index(&list, i));
+        j = -1;
+        while (++j < tag->param.size)
+        {
+            param = buffer_get_index(&tag->param, j);
+            if (strncasecmp(param->name, "href", STRING_SIZE) == 0)
+            {
+                if (param->data.buf && *((char *)param->data.buf) == '#')
+                    continue;
+                full_url = url_get_full(node->request.url, param->data.buf);
+                if (buffer_contain_string(&printed, full_url) != -1)
+                {
+                    FREE(full_url);
+                    continue;
+                }
+                buffer_push(&printed, &full_url);
+            }
+        }
+    }
+    buffer_free(&list);
+    /////////////////////////////////////////////////////
+
+    size_t num_tags = printed.size;
+
+    // Initialiser le pool de threads
+    pthread_t *threads;
+    if (!(threads = ALLOC(sizeof(pthread_t) * num_tags)))
+    {
+        buffer_free_string(&printed);
+        return (1);
+    }
+    pool.tasks = malloc(num_tags * sizeof(thread_data_t));
+    pool.task_count = num_tags;
+    pool.task_index = 0;
+    pthread_mutex_init(&pool.mutex, NULL);
+    pthread_cond_init(&pool.cond, NULL);
+
+    char *url; //bugshit
+    // Remplir le pool de tâches
+    for (size_t i = 0; i < num_tags; i++) {
+        url = *((char **)buffer_get_index(&printed, i));
+        pool.tasks[i].node = node;
+        pool.tasks[i].url = url;
+    }
+
+    // Créer les threads
+    for (int i = 0; i < num_tags; i++) {
+        pthread_create(&threads[i], NULL, process_tag_samesite, &pool);
+    }
+
+    // Signaler aux threads qu'il y a des tâches à traiter
+    pthread_mutex_lock(&pool.mutex);
+    pool.task_index = 0; // Réinitialiser l'index des tâches
+    pthread_cond_broadcast(&pool.cond); // Signaler tous les threads
+    pthread_mutex_unlock(&pool.mutex);
+
+    // Attendre que tous les threads se terminent
+    for (int i = 0; i < num_tags; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    // Libération des ressources
+    free(pool.tasks);
+    pthread_mutex_destroy(&pool.mutex);
+    pthread_cond_destroy(&pool.cond);
+    buffer_free_string(&printed);
+    FREE(threads);
+    return (0);
+}
+
+int             web_shell_command_expand_samesite_singlethread(char *input, t_web_node *node)
 {
     t_web_node              *child;
     struct s_buf            list;
@@ -5468,6 +5725,100 @@ int             web_shell_command_mail(char *input, t_web_node *node)
 }
 
 int             web_shell_command_expand_notsamesite(char *input, t_web_node *node)
+{
+    struct s_buf list;
+    t_html_node *tag;
+    thread_pool_t pool;
+
+    // Vérification des entrées
+    if (!node || !input)
+        return (1);
+
+    list = html_find_tag(&node->html, "a");
+    /// TODO FILTER UNIQUE
+
+
+    /////////////////////////////////////////////////////
+    t_buf_param         *param;
+    char                *full_url;
+    struct s_buf        printed;
+    uint                i;
+    uint                j;
+
+    printed = buffer_new(sizeof(char *), 0);
+    i = -1;
+    while (++i < list.size)
+    {
+        tag = *((t_html_node **)buffer_get_index(&list, i));
+        j = -1;
+        while (++j < tag->param.size)
+        {
+            param = buffer_get_index(&tag->param, j);
+            if (strncasecmp(param->name, "href", STRING_SIZE) == 0)
+            {
+                if (param->data.buf && *((char *)param->data.buf) == '#')
+                    continue;
+                full_url = url_get_full(node->request.url, param->data.buf);
+                if (buffer_contain_string(&printed, full_url) != -1)
+                {
+                    FREE(full_url);
+                    continue;
+                }
+                buffer_push(&printed, &full_url);
+            }
+        }
+    }
+    buffer_free(&list);
+    /////////////////////////////////////////////////////
+
+    size_t num_tags = printed.size;
+
+    // Initialiser le pool de threads
+    pthread_t *threads;
+    if (!(threads = ALLOC(sizeof(pthread_t) * num_tags)))
+    {
+        buffer_free_string(&printed);
+        return (1);
+    }
+    pool.tasks = malloc(num_tags * sizeof(thread_data_t));
+    pool.task_count = num_tags;
+    pool.task_index = 0;
+    pthread_mutex_init(&pool.mutex, NULL);
+    pthread_cond_init(&pool.cond, NULL);
+
+    char *url; //bugshit
+    // Remplir le pool de tâches
+    for (size_t i = 0; i < num_tags; i++) {
+        url = *((char **)buffer_get_index(&printed, i));
+        pool.tasks[i].node = node;
+        pool.tasks[i].url = url;
+    }
+
+    // Créer les threads
+    for (int i = 0; i < num_tags; i++) {
+        pthread_create(&threads[i], NULL, process_tag_notsamesite, &pool);
+    }
+
+    // Signaler aux threads qu'il y a des tâches à traiter
+    pthread_mutex_lock(&pool.mutex);
+    pool.task_index = 0; // Réinitialiser l'index des tâches
+    pthread_cond_broadcast(&pool.cond); // Signaler tous les threads
+    pthread_mutex_unlock(&pool.mutex);
+
+    // Attendre que tous les threads se terminent
+    for (int i = 0; i < num_tags; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    // Libération des ressources
+    free(pool.tasks);
+    pthread_mutex_destroy(&pool.mutex);
+    pthread_cond_destroy(&pool.cond);
+    buffer_free_string(&printed);
+    FREE(threads);
+    return (0);
+}
+int             web_shell_command_expand_notsamesite_singlethread(char *input, t_web_node *node)
 {
     t_web_node              *child;
     struct s_buf            list;
@@ -5856,6 +6207,33 @@ int             web_shell_command_links(char *input, t_web_node *node)
     printf("Total links: %u\n", printed.size);
     buffer_free(&list);
     buffer_free_string(&printed);
+    return (0);
+}
+
+int             web_shell_command_delete(char *input, t_web_node *node)
+{
+    t_web_node      *child;
+    char            *ptr;
+    int             i;
+
+    if (!input || !node)
+        return (0);
+    if ((ptr = string_goto_numeric(input)))
+    {
+        i = atoi(ptr);
+        if (i >= 0 && i < node->child.size)
+        {
+            child = *((t_web_node **)buffer_get_index(&node->child, (uint)i));
+            if (!child)
+                printf("Bad child index\n");
+            ///web_free_node(child); // LEAKS
+            buffer_delete_index(&node->child, i);
+        }
+        else
+            printf("Bad child index\n");
+    }
+    else
+        printf("Usage: goto [index]\n");
     return (0);
 }
 
@@ -7091,7 +7469,7 @@ int             web_shell(t_web_node *node)
         {
             if (!node && node->parent)
             {
-                web_shell_command_export("export default.xml", node);
+                web_shell_command_export("export default.xml", web_root_node(node));
             }
             return (1);
         }
@@ -7123,7 +7501,7 @@ int             web_shell(t_web_node *node)
             {
                 if (node && !node->parent)
                 {
-                    web_shell_command_export("export default.xml", node);
+                    web_shell_command_export("export default.xml", web_root_node(node));
                 }
                 return (1);
             }
@@ -7136,6 +7514,13 @@ int             web_shell(t_web_node *node)
         if (strncmp(input, "texttag", strlen("texttag")) == 0)
             web_shell_command_texttag(input, node);
         if (strncmp(input, "htmldisplay", strlen("htmldisplay")) == 0)
+        {///
+            char *content;
+            content = html_tostring(&node->html);
+            //html_display_node(&node->html, 0);
+            printf("%s\n", content);
+        }///
+        if (strncmp(input, "nodedisplay", strlen("htmldisplay")) == 0)
             html_display_node(&node->html, 0);
         if (strncmp(input, "export", strlen("export")) == 0)
             web_shell_command_export(input, node);
@@ -7158,6 +7543,8 @@ int             web_shell(t_web_node *node)
             web_shell_command_expandallnotsamesite(input, node);
         if (strncmp(input, "mail", strlen("mail")) == 0)
             web_shell_command_mail(input, node);
+        if (strncmp(input, "delete", strlen("delete")) == 0)
+            web_shell_command_delete(input, node);
         if (strncmp(input, "host", strlen("host")) == 0)
             if (web_shell_command_host(input, node))
                 return (1);
